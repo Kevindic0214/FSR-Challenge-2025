@@ -108,13 +108,19 @@ def main():
     ap.add_argument("--out_dir", type=Path, default=DEF_OUT, help="輸出目錄（會建立）")
     ap.add_argument("--dev_speakers", type=int, default=12, help="dev 說話人數量（預設 12）")
     ap.add_argument("--seed", type=int, default=1337)
-    ap.add_argument("--drop_mispronounce", action="store_true",
+    
+    # 讀音問題濾除：互斥
+    misgrp = ap.add_mutually_exclusive_group()
+    misgrp.add_argument("--drop_mispronounce", action="store_true",
                     help="過濾備註含『正確讀音』的樣本（建議開啟）")
-    ap.add_argument("--keep_mispronounce", action="store_true",
+    misgrp.add_argument("--keep_mispronounce", action="store_true",
                     help="保留備註含『正確讀音』的樣本（與 --drop_mispronounce 互斥）")
-    ap.add_argument("--keep_asterisk", action="store_true",
-                    help="保留合音 '*'（預設保留；若不想要，別加這個，改用 --strip_asterisk）")
-    ap.add_argument("--strip_asterisk", action="store_true",
+    
+    # 合音星號：互斥
+    astgrp = ap.add_mutually_exclusive_group()
+    astgrp.add_argument("--keep_asterisk", action="store_true",
+                    help="保留合音 '*'（預設保留）")
+    astgrp.add_argument("--strip_asterisk", action="store_true",
                     help="移除合音 '*'")
     args = ap.parse_args()
 
@@ -134,7 +140,7 @@ def main():
     all_speakers = set()
 
     # 正規化參數
-    keep_ast = not args.strip_asterisk  # 預設保留；若使用 --strip_asterisk 則 False
+    keep_ast = True if args.keep_asterisk else (not args.strip_asterisk)  # 預設保留；若使用 --strip_asterisk 則 False
     drop_mispron = args.drop_mispronounce and not args.keep_mispronounce
 
     for wav in iter_training_wavs(args.root):
