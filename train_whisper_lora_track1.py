@@ -106,8 +106,8 @@ def cer_metric(preds: List[str], refs: List[str]) -> float:
 
     total_e, total_ref = 0, 0
     for h, r in zip(preds, refs):
-        H = list(re.sub(r"\s+", "", h))
-        R = list(re.sub(r"\s+", "", r))
+        H = list(re.sub(r"[\s*]+", "", h))
+        R = list(re.sub(r"[\s*]+", "", r))
         total_e += ed(H, R)
         total_ref += len(R)
     return 100.0 * total_e / max(1, total_ref)
@@ -168,6 +168,7 @@ def main():
         do_sample=False,
         num_beams=5,
         length_penalty=1.0,
+        max_new_tokens=225,
         return_dict_in_generate=False,
         output_scores=False,
     )
@@ -216,7 +217,12 @@ def main():
             with torch.no_grad():
                 for batch in loader:
                     feats = batch["input_features"].to(self.model.device, non_blocking=True)
-                    gen_ids = self.model.generate(input_features=feats, **gen_kwargs)
+                    gen_ids = self.model.generate(
+                        input_features=feats, 
+                        forced_decoder_ids=None,
+                        suppress_tokens=[],
+                        **gen_kwargs
+                    )
                     # 解碼為漢字
                     texts = processor.batch_decode(gen_ids, skip_special_tokens=True)
                     texts = [re.sub(r"\s+", "", t) for t in texts]  # 去多餘空白
