@@ -4,3 +4,6 @@ FSR-2025-Hakka-evaluation/
 FSR-2025-Hakka-evaluation-key/
 exp_track1_whisper_large_lora/
 exp_track2_whisper_large_lora/
+*.csv
+*.txt
+*.tsv
