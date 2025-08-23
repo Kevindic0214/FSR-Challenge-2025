@@ -16,7 +16,7 @@
   * **Track 2**：客語拼音（SER, 本調）
 * **資料**
 
-  * 訓練使用：主辦提供 **FSR-2025-Hakka-train**（約 60 h，六堆/詔安，單聲道 16 kHz）
+  * 訓練使用：主辦提供 **FSR-2025-Hakka-train**（約 60 h，大埔/詔安，單聲道 16 kHz）
   * 評測：**HAT-Vol2**（約 80 h，內含 eval/test；test 不可人工聽取）
   * 熱身賽（Pilot）：**FSR-2025-Hakka-evaluation**（錄製 \~8 h + 媒體 \~2 h）
 * **提交**
@@ -51,12 +51,12 @@ FSR-Challenge-2025/
 ├── prepare_hakka_track2.py          # 生成 Track2 (拼音) train/dev manifests
 ├── train_whisper_lora_track2.py     # Whisper-large-v2 + LoRA 訓練 (拼音)
 ├── infer_whisper_track2.py          # 批量解碼；含平均 logprob 估計
-├── infer_hakka_pinyin_warmup.py     # 產生熱身賽「Level-Up_拼音.csv」
+├── infer_hakka_pinyin_warmup.py     # 產生熱身賽「Level-Up_pinyin.csv」
 ├── quick_infer_one.py               # 快速單檔驗證（語音→拼音）
 │
 ├── prepare_hakka_track1.py          # 生成 Track1 (漢字) train/dev manifests
 ├── train_whisper_lora_track1.py     # Whisper-large-v2 + LoRA 訓練 (漢字)
-#（建議新增）infer_hakka_hanzi_warmup.py  # 產生熱身賽「Level-Up_漢字.csv」
+#（建議新增）infer_hakka_hanzi_warmup.py  # 產生熱身賽「Level-Up_hanzi.csv」
 │
 ├── HAT-Vol2/                        # 原始資料 + manifests*/  (train/dev jsonl)
 ├── FSR-2025-Hakka-evaluation/       # 熱身賽資料（錄製+媒體）
@@ -156,7 +156,7 @@ FSR-2025-Hakka-evaluation/
   (fsr2025) python3 infer_hakka_pinyin_warmup.py \
     --eval_root FSR-2025-Hakka-evaluation \
     --lora_dir  exp_track2_whisper_large_lora \
-    --outfile   Level-Up_拼音.csv \
+    --outfile   Level-Up_pinyin.csv \
     --beams 1
   ```
 
@@ -166,7 +166,7 @@ FSR-2025-Hakka-evaluation/
   (fsr2025) python3 infer_hakka_hanzi_warmup.py \
     --eval_root FSR-2025-Hakka-evaluation \
     --lora_dir  exp_track1_whisper_large_lora \
-    --outfile   Level-Up_漢字.csv \
+    --outfile   Level-Up_hanzi.csv \
     --beams 1 \
     --strip_asterisk   # 交卷前移除「*」
   ```
@@ -232,7 +232,7 @@ python3 plot_loss.py --exp_dir exp_track1_whisper_large_lora
 python3 infer_hakka_pinyin_warmup.py \
   --eval_root FSR-2025-Hakka-evaluation \
   --lora_dir  exp_track2_whisper_large_lora \
-  --outfile   Level-Up_拼音.csv
+  --outfile   Level-Up_pinyin.csv
 
 # （Track1）建議新增 infer_hakka_hanzi_warmup.py 後執行：
 # python3 infer_hakka_hanzi_warmup.py --eval_root FSR-2025-Hakka-evaluation \
