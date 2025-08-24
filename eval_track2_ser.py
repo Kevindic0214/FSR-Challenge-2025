@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, csv, re, glob, argparse
+import os, csv, re, glob, argparse, unicodedata
 from collections import OrderedDict
+
+ZERO_WIDTH = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 
 # ---------------- helpers ----------------
 def tokenize_pinyin(raw: str, drop_star_tokens: bool = True):
@@ -14,6 +16,8 @@ def tokenize_pinyin(raw: str, drop_star_tokens: bool = True):
     """
     if not raw:
         return []
+    raw = unicodedata.normalize("NFKC", raw)
+    raw = ZERO_WIDTH.sub("", raw)
     pieces = re.split(r"\s+", raw.strip())
     kept = []
     for p in pieces:
