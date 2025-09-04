@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Prepare manifests for FSR-2025 Track 1 (Hakka Hanzi).
+Key improvements:
+- Robust text normalization (NFKC, zero-width removal, optional punctuation stripping).
+- CSV duplicate-key detection and coverage auditing.
+- Balanced dev speaker selection across DF/DM/ZF/ZM (with XX fallback), reproducible via --seed.
+- Portable audio paths via --relative_audio_path.
+- Persisted diagnostics: prepare_report.json (+ optional --stats_out) and dev_speakers.txt.
+- JSONL schema: {"utt_id","audio","hanzi","text","group"} (text == normalized hanzi).
+"""
+
 import argparse
 import csv
 import json
 import random
 import re
+import unicodedata
 from pathlib import Path
 from collections import defaultdict
 
@@ -21,15 +33,53 @@ COL_REMARKS = "備註"
 # Marker considered as "mispronunciation" and filtered out (unless --keep_mispronounce is used)
 MISPRONOUNCE_KEY = "正確讀音"
 
+# Zero-width chars and punctuation normalization
+_ZW_CHARS_RE = re.compile(r"[\u200B-\u200F\uFEFF]")
+_PUNCT_TABLE = str.maketrans({
+    "，": "，", "。": "。", "、": "、", "！": "！", "？": "？", "；": "；", "：": "：",
+    "（": "（", "）": "）", "「": "「", "」": "」", "『": "『", "』": "』",
+    ",": "，", ".": "。", "!": "！", "?": "？", ";": "；", ":": "：",
+    "(": "（", ")": "）", "[": "（", "]": "）", "{": "（", "}" : "）",
+    "—": "－", "–": "－", "-": "－",
+})
+
 # --------- Helper functions ---------
+def normalize_hanzi(
+    text: str,
+    strip_spaces: bool = True,
+    keep_asterisk: bool = True,
+    strip_punct: bool = False,
+) -> str:
+    """
+    Robust text normalization for Track-1 Hanzi:
+      - Unicode NFKC normalization (unify full/half width & compatibility forms)
+      - Remove zero-width characters
+      - Default: remove all whitespaces
+      - Default: keep '*' (co-articulation marker), optionally strip
+      - Optional: strip punctuation (keep off by default to match evaluation unless aligned)
+    """
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", text)
+    t = _ZW_CHARS_RE.sub("", t)
+    t = t.translate(_PUNCT_TABLE)
+    if strip_spaces:
+        t = re.sub(r"\s+", "", t)
+    if not keep_asterisk:
+        t = t.replace("*", "")
+    if strip_punct:
+        t = re.sub(r"[，。、！？」；：「『』（）－,\.!\?:;\[\]\{\}\(\)\"']", "", t)
+    return t
+
+
 def load_csv_mapping(csv_path: Path):
     """
     Read one *_edit.csv and return:
     - mapping: { wav_filename -> {"hanzi": str, "remarks": str} }
-    - kept, dropped_empty_text, dropped_mispronounced (currently dropped_mispronounced always 0 here)
+    - kept, dropped_empty_text
     """
     mapping = {}
-    kept = dropped_empty = dropped_mis = 0
+    kept = dropped_empty = 0
 
     # Using utf-8-sig automatically skips BOM
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -45,22 +95,30 @@ def load_csv_mapping(csv_path: Path):
                 continue
             mapping[fn] = {"hanzi": hanzi, "remarks": remarks}
             kept += 1
-    return mapping, kept, dropped_empty, dropped_mis
+    return mapping, kept, dropped_empty
+
 
 def scan_all_csvs(root: Path):
     """
     Find all *_edit.csv under root and merge into one mapping.
+    Detect duplicate filename keys across CSVs and keep the first occurrence.
     """
     glob_csvs = sorted(root.rglob("*_edit.csv"))
     all_map = {}
-    stats = {"kept": 0, "dropped_empty_text": 0, "files": 0}
+    stats = {"kept": 0, "dropped_empty_text": 0, "files": 0, "duplicates_in_csv": 0}
     for c in glob_csvs:
-        m, kept, dropped_empty, _ = load_csv_mapping(c)
-        all_map.update(m)
+        m, kept, dropped_empty = load_csv_mapping(c)
+        for k, v in m.items():
+            if k in all_map:
+                stats["duplicates_in_csv"] += 1
+                # Keep the first seen; comment the line below to overwrite instead.
+                continue
+            all_map[k] = v
         stats["kept"] += kept
         stats["dropped_empty_text"] += dropped_empty
         stats["files"] += 1
     return all_map, glob_csvs, stats
+
 
 def iter_training_wavs(root: Path):
     """
@@ -70,18 +128,19 @@ def iter_training_wavs(root: Path):
     """
     dirs = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("訓練_")]
     for d in dirs:
-            for wav in d.rglob("*.wav"):
-                    yield wav
+        for wav in d.rglob("*.wav"):
+            yield wav
+
 
 def speaker_id_from_path(wav_path: Path):
     """
     Speaker ID = immediate parent directory name, e.g.:
         訓練_大埔腔30H/DF101K2001/DF101K2001_001.wav -> DF101K2001
     """
-    # wav_path.parts = (..., 訓練_大埔腔30H, DF101K2001, file.wav)
     if len(wav_path.parts) < 2:
-            return "unknown"
+        return "unknown"
     return wav_path.parent.name
+
 
 def group_tag_from_speaker(spk: str):
     """
@@ -89,18 +148,6 @@ def group_tag_from_speaker(spk: str):
     """
     return spk[:2] if len(spk) >= 2 else "XX"
 
-def normalize_hanzi(text: str, strip_spaces=True, keep_asterisk=True):
-    """
-    Text normalization:
-      - Remove all whitespace by default (CER is whitespace-sensitive; usually we don't need spaces)
-      - Keep '*' (co-articulation marker) by default; optionally strip
-    """
-    t = text
-    if strip_spaces:
-        t = re.sub(r"\s+", "", t)
-    if not keep_asterisk:
-        t = t.replace("*", "")
-    return t
 
 # --------- Main pipeline ---------
 def main():
@@ -109,22 +156,32 @@ def main():
     ap.add_argument("--out_dir", type=Path, default=DEF_OUT, help="Output directory (will be created)")
     ap.add_argument("--dev_speakers", type=int, default=12, help="Number of dev speakers (default 12)")
     ap.add_argument("--seed", type=int, default=1337)
-    
+
     # Mispronunciation filtering: mutually exclusive
     misgrp = ap.add_mutually_exclusive_group()
     misgrp.add_argument("--drop_mispronounce", action="store_true",
-                    help="Filter samples whose remarks contain '正確讀音' (recommended)")
+                        help="Filter samples whose remarks contain '正確讀音' (recommended)")
     misgrp.add_argument("--keep_mispronounce", action="store_true",
-                    help="Keep samples whose remarks contain '正確讀音' (mutually exclusive with --drop_mispronounce)")
-    
+                        help="Keep samples whose remarks contain '正確讀音' (mutually exclusive with --drop_mispronounce)")
+
     # Asterisk handling (co-articulation marker): mutually exclusive
     astgrp = ap.add_mutually_exclusive_group()
     astgrp.add_argument("--keep_asterisk", action="store_true",
-                    help="Keep co-articulation '*' (default behavior)")
+                        help="Keep co-articulation '*' (default behavior)")
     astgrp.add_argument("--strip_asterisk", action="store_true",
-                    help="Strip co-articulation '*' from text")
-    args = ap.parse_args()
+                        help="Strip co-articulation '*' from text")
 
+    # Normalization / I/O / audit options
+    ap.add_argument("--strip_punct", action="store_true",
+                    help="Strip punctuation during normalization (default: keep)")
+    ap.add_argument("--relative_audio_path", action="store_true",
+                    help="Store audio path as relative to --root (default: absolute path)")
+    ap.add_argument("--stats_out", type=Path, default=None,
+                    help="Optional path to write stats json (e.g., manifests_track1/stats.json)")
+    ap.add_argument("--dev_list_out", type=Path, default=None,
+                    help="Optional path to write picked dev speakers list (txt)")
+
+    args = ap.parse_args()
     random.seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,22 +194,29 @@ def main():
     entries_by_spk = defaultdict(list)
     kept, missing_audio, dropped_mis, total = 0, 0, 0, 0
 
+    # Coverage / audit sets
+    used_csv_keys = set()   # CSV rows that are actually used (by filename)
+    seen_audio_fns = set()  # wav basenames seen in training dirs
+
     # Speaker statistics (for balanced dev selection)
     all_speakers = set()
 
     # Normalization parameters
     keep_ast = True if args.keep_asterisk else (not args.strip_asterisk)  # default keep; set False if --strip_asterisk
     drop_mispron = args.drop_mispronounce and not args.keep_mispronounce
+    strip_punct = bool(args.strip_punct)
 
     for wav in iter_training_wavs(args.root):
         total += 1
         fn = wav.name  # e.g., DF101K2001_001.wav
+        seen_audio_fns.add(fn)
         item = mapping.get(fn)
         if item is None:
-            # Not in CSV mapping -> skip
+            # Audio exists but CSV doesn't have a mapping -> record via audit counters later
             continue
 
-        hanzi = normalize_hanzi(item["hanzi"], strip_spaces=True, keep_asterisk=keep_ast)
+        hanzi = normalize_hanzi(item["hanzi"], strip_spaces=True,
+                                keep_asterisk=keep_ast, strip_punct=strip_punct)
         # Filter mispronunciation samples containing the key string
         if drop_mispron and MISPRONOUNCE_KEY in (item.get("remarks") or ""):
             dropped_mis += 1
@@ -162,15 +226,25 @@ def main():
             missing_audio += 1
             continue
 
+        used_csv_keys.add(fn)
         spk = speaker_id_from_path(wav)
         all_speakers.add(spk)
+
+        # Relative or absolute path
+        if args.relative_audio_path:
+            try:
+                audio_path = str(wav.resolve().relative_to(args.root.resolve()))
+            except Exception:
+                audio_path = wav.name  # conservative fallback
+        else:
+            audio_path = str(wav.resolve())
 
         utt_id = wav.stem
         entries_by_spk[spk].append({
             "utt_id": utt_id,
-            "audio": str(wav.resolve()),
+            "audio": audio_path,
             "hanzi": hanzi,
-            "text": hanzi,  # Duplicate field for downstream convenience
+            "text": hanzi,  # downstream convenience; keep 'hanzi' for auditing
             "group": group_tag_from_speaker(spk),
         })
         kept += 1
@@ -180,14 +254,10 @@ def main():
     for spk in sorted(all_speakers):
         spk_by_group[group_tag_from_speaker(spk)].append(spk)
 
-    # Aim for even per-group allocation; later fill deficits from remaining
-    desired_per_group = {}
     groups = ["DF", "DM", "ZF", "ZM"]
     base = args.dev_speakers // len(groups)
     rem  = args.dev_speakers % len(groups)
-    for g in groups:
-        desired_per_group[g] = base
-    # Distribute any remainder to the first groups in order
+    desired_per_group = {g: base for g in groups}
     for g in groups[:rem]:
         desired_per_group[g] += 1
 
@@ -198,14 +268,21 @@ def main():
         take = min(len(cand), desired_per_group[g])
         dev_speakers.extend(cand[:take])
 
-    # If still insufficient (some groups too small), fill from remaining speakers
+    # If still insufficient (some groups too small), fill from remaining speakers (including 'XX')
     if len(dev_speakers) < args.dev_speakers:
         remaining = [s for s in sorted(all_speakers) if s not in dev_speakers]
-        need = args.dev_speakers - len(dev_speakers)
         random.shuffle(remaining)
+        need = args.dev_speakers - len(dev_speakers)
         dev_speakers.extend(remaining[:need])
 
     dev_speakers = sorted(dev_speakers)[:args.dev_speakers]
+
+    # Persist selected dev speaker list (optional but recommended)
+    if args.dev_list_out:
+        args.dev_list_out.parent.mkdir(parents=True, exist_ok=True)
+        with args.dev_list_out.open("w", encoding="utf-8") as fdev:
+            for s in dev_speakers:
+                fdev.write(s + "\n")
 
     # ---- Split into train/dev and write JSONL ----
     train_out = args.out_dir / "train.jsonl"
@@ -224,22 +301,62 @@ def main():
                     ft.write(line + "\n")
                     n_train += 1
 
-    # ---- Output statistics ----
+    # ---- Coverage & distribution statistics ----
+    csv_but_no_audio = len(set(mapping.keys()) - used_csv_keys)
+    audio_not_in_csv = len(seen_audio_fns - set(mapping.keys()))
+
+    # Group distribution
+    all_groups = ["DF", "DM", "ZF", "ZM", "XX"]
+    group_distribution = {g: {"speakers": 0, "utts": 0} for g in all_groups}
+    dev_utt_by_group   = {g: 0 for g in all_groups}
+
+    for spk, items in entries_by_spk.items():
+        g = group_tag_from_speaker(spk)
+        if g not in group_distribution:
+            group_distribution[g] = {"speakers": 0, "utts": 0}
+            dev_utt_by_group[g] = 0
+        group_distribution[g]["speakers"] += 1
+        group_distribution[g]["utts"]     += len(items)
+        if spk in set(dev_speakers):
+            dev_utt_by_group[g] += len(items)
+
+    # ---- Final stats (aligned with Track2 + extended fields) ----
     stats = {
         "csv_files": csv_stats["files"],
         "csv_kept_rows": csv_stats["kept"],
         "csv_dropped_empty_text": csv_stats["dropped_empty_text"],
+        "duplicates_in_csv": csv_stats.get("duplicates_in_csv", 0),
         "kept": kept,
         "dropped_mispronounced": dropped_mis,
         "missing_audio": missing_audio,
+        "csv_but_no_audio": csv_but_no_audio,
+        "audio_not_in_csv": audio_not_in_csv,
         "speakers_total": len(all_speakers),
         "speakers_dev": len(dev_speakers),
         "dev_speakers": dev_speakers,
         "train_utt": n_train,
         "dev_utt": n_dev,
         "keep_asterisk": keep_ast,
+        "strip_punct": strip_punct,
+        "relative_audio_path": bool(args.relative_audio_path),
+        "group_distribution": group_distribution,
+        "dev_utt_by_group": dev_utt_by_group,
     }
-    print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    # Console print
+    # print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    # ---- Save report JSON (match Track2 behavior) ----
+    report_path = args.out_dir / "prepare_report.json"
+    with report_path.open("w", encoding="utf-8") as fr:
+        json.dump(stats, fr, ensure_ascii=False, indent=2)
+
+    # Optional extra stats path for CI or custom location
+    if args.stats_out:
+        args.stats_out.parent.mkdir(parents=True, exist_ok=True)
+        with args.stats_out.open("w", encoding="utf-8") as fs:
+            json.dump(stats, fs, ensure_ascii=False, indent=2)
+
 
 if __name__ == "__main__":
     main()
