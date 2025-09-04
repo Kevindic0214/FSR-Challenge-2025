@@ -218,9 +218,10 @@ def main():
         w.writerow(["錄音檔檔名", "辨認結果"])
         for utt_id, apath in tqdm(pair_list, ncols=100, desc="Decoding"):
             wav = load_audio(apath, target_sr=SR)
+            model_dtype = next(model.parameters()).dtype
             feats = processor.feature_extractor(
                 wav.numpy(), sampling_rate=SR, return_tensors="pt"
-            ).input_features.to(device)
+            ).input_features.to(device=device, dtype=model_dtype)
             with torch.no_grad():
                 pred_ids = model.generate(
                     input_features=feats,
