@@ -2,23 +2,21 @@
 # -*- coding: utf-8 -*-
 
 """
-Whisper-large-v2 + LoRA for Track 1 (客語漢字)
-- 讀取 JSONL manifest（每行至少含 {"utt_id","audio","text"} 或 {"utt_id","audio","hanzi"}）
-- labels 以「漢字序列」訓練
-- 驗證指標：CER（character error rate）
-- 24GB 4090 友善（LoRA + gradient checkpointing + TF32）
+Whisper-large-v2 + LoRA for Track 1 (Hakka Hanzi) — R3
+
+- Read JSONL manifest (each line contains {"utt_id","audio","text"} or {"utt_id","audio","hanzi"})
+- Consistent normalization with prepare/infer/eval (default keep '*', keep punctuation)
+- Evaluation metric: CER (beam=5, forced Chinese transcription)
+- 24GB GPU friendly: LoRA + gradient checkpointing + TF32 + bf16 (auto-detection)
 """
 
-import os
-import json
-import re
-from pathlib import Path
+import os, json, re, argparse
 from dataclasses import dataclass
-from typing import List
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 
 import torch
-import soundfile as sf
-import librosa
+import torchaudio
 
 from transformers import (
     WhisperForConditionalGeneration, WhisperProcessor, WhisperTokenizer,
@@ -26,63 +24,96 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model
 
-# ---- 減少 CUDA 記憶體碎片（顯著穩定）----
+# ---- More stable memory management / 4090 friendly ----
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-# ---- 讓 4090 更穩（開啟 TF32）----
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# ---------- I/O 路徑 ----------
-MANI_DIR    = Path("HAT-Vol2/manifests_track1")
-TRAIN_JSONL = MANI_DIR / "train.jsonl"
-DEV_JSONL   = MANI_DIR / "dev.jsonl"
-OUT_DIR     = Path("exp_track1_whisper_large_lora")
-
-MODEL_NAME  = "openai/whisper-large-v2"
 SR = 16000
 
-# ---------- 資料集 ----------
+# ---------- Normalization (aligned with prepare/infer/eval) ----------
+import unicodedata
+_PUNCT_TABLE = str.maketrans({
+    "，":"，","。":"。","、":"、","！":"！","？":"？","；":"；","：":"：",
+    "（":"（","）":"）","「":"「","」":"」","『":"『","』":"』",
+    ",":"，",".":"。","!":"！","?":"？",";":"；",":":"：",
+    "(":"（",")":"）","[":"（","]":"）","{":"（","}":"）",
+    "—":"－","–":"－","-":"－",
+})
+import re as _re
+_ZW_CHARS_RE = _re.compile(r"[\u200B-\u200F\uFEFF]")
+def normalize_hanzi(text: str, strip_spaces=True, keep_asterisk=True, strip_punct=False) -> str:
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", text)
+    t = _ZW_CHARS_RE.sub("", t)
+    t = t.translate(_PUNCT_TABLE)
+    if strip_spaces:
+        t = _re.sub(r"\s+", "", t)
+    if not keep_asterisk:
+        t = t.replace("*", "")
+    if strip_punct:
+        t = _re.sub(r"[，。、！？」；：「『』（）－,\.!\?:;\[\]\{\}\(\)\"']", "", t)
+    return t
+
+# ---------- Dataset ----------
 class JsonlASRDataset(torch.utils.data.Dataset):
     """
-    期待 jsonl 欄位：
-      - 必要： "audio" (wav 路徑)
-      - 文字： 優先用 "hanzi"，否則用 "text"（請確保為漢字）
-      - 可選： "utt_id"
+    JSONL fields:
+      - "audio": audio file path (can be relative to --root)
+      - "hanzi" or "text": Hakka Hanzi annotation
+      - "utt_id": optional
     """
-    def __init__(self, jsonl_path: Path, processor: WhisperProcessor):
-        self.items = [json.loads(l) for l in jsonl_path.read_text(encoding="utf-8").splitlines()]
+    def __init__(self, jsonl_path: Path, processor: WhisperProcessor, root: Optional[Path],
+                 keep_asterisk: bool, strip_punct: bool):
+        self.lines = jsonl_path.read_text(encoding="utf-8").splitlines()
         self.processor = processor
+        self.root = root
+        self.keep_asterisk = keep_asterisk
+        self.strip_punct = strip_punct
 
-    def __len__(self) -> int:
-        return len(self.items)
+    def __len__(self): return len(self.lines)
+
+    def _resolve_audio(self, p: str) -> str:
+        P = Path(p)
+        if not P.is_absolute():
+            if self.root is None:
+                raise RuntimeError(f"Relative audio path but --root not provided: {p}")
+            P = (self.root / P).resolve()
+        return str(P)
 
     def __getitem__(self, i: int):
-        ex = self.items[i]
-        wav, _sr = sf.read(ex["audio"])
-        if _sr != SR:
-            wav = librosa.resample(wav, orig_sr=_sr, target_sr=SR)
-        if wav.ndim > 1:
-            wav = wav.mean(axis=1)
+        ex = json.loads(self.lines[i])
+        apath = self._resolve_audio(ex["audio"])
 
-        inputs = self.processor.feature_extractor(wav, sampling_rate=SR, return_tensors="pt")
-        # --- 取漢字標籤 ---
-        text_hz = ex.get("hanzi", ex.get("text", ""))
-        text_hz = re.sub(r"\s+", "", str(text_hz))  # 去多餘空白
+        wav, sr = torchaudio.load(apath)
+        if wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != SR:
+            wav = torchaudio.functional.resample(wav, sr, SR)
+        wav = wav.squeeze(0)
 
-        labels = self.processor.tokenizer(text_hz, add_special_tokens=True).input_ids
+        feats = self.processor.feature_extractor(wav.numpy(), sampling_rate=SR, return_tensors="pt")
+
+        txt_raw = ex.get("hanzi", ex.get("text", ""))
+        txt_norm = normalize_hanzi(
+            txt_raw, strip_spaces=True,
+            keep_asterisk=self.keep_asterisk,
+            strip_punct=self.strip_punct
+        )
+
+        ids = self.processor.tokenizer(txt_norm, add_special_tokens=True).input_ids
 
         return {
-            "input_features": inputs.input_features[0],
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "utt_id": ex.get("utt_id", Path(ex["audio"]).stem),
+            "input_features": feats.input_features[0],
+            "labels": torch.tensor(ids, dtype=torch.long),
+            "utt_id": ex.get("utt_id", Path(apath).stem),
         }
 
-# ---------- collator ----------
+# ---------- Collator ----------
 @dataclass
 class DataCollator:
-    processor: WhisperProcessor
-    def __call__(self, features):
+    def __call__(self, features: List[Dict[str, Any]]):
         feats = [f["input_features"] for f in features]
         labels = [f["labels"] for f in features]
         return {
@@ -93,95 +124,122 @@ class DataCollator:
 
 # ---------- CER ----------
 def cer_metric(preds: List[str], refs: List[str]) -> float:
-    """Character Error Rate（去掉空白後逐字比較）。"""
-    def ed(a, b):
-        dp = [[0]*(len(b)+1) for _ in range(len(a)+1)]
-        for i in range(len(a)+1): dp[i][0] = i
-        for j in range(len(b)+1): dp[0][j] = j
-        for i in range(1, len(a)+1):
-            for j in range(1, len(b)+1):
-                c = 0 if a[i-1] == b[j-1] else 1
-                dp[i][j] = min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+c)
-        return dp[-1][-1]
-
+    def ed(a: str, b: str) -> int:
+        la, lb = len(a), len(b)
+        if la == 0: return lb
+        if lb == 0: return la
+        prev = list(range(lb + 1))
+        curr = [0]*(lb + 1)
+        for i in range(1, la + 1):
+            curr[0] = i
+            ca = a[i-1]
+            for j in range(1, lb + 1):
+                cb = b[j-1]
+                cost = 0 if ca == cb else 1
+                curr[j] = min(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
+            prev, curr = curr, prev
+        return prev[lb]
     total_e, total_ref = 0, 0
     for h, r in zip(preds, refs):
-        H = list(re.sub(r"[\s*]+", "", h))
-        R = list(re.sub(r"[\s*]+", "", r))
-        total_e += ed(H, R)
-        total_ref += len(R)
+        total_e += ed(h, r)
+        total_ref += len(r)
     return 100.0 * total_e / max(1, total_ref)
 
-# ---------- 主程式 ----------
+# ---------- Main ----------
 def main():
-    set_seed(1337)
-    processor = WhisperProcessor.from_pretrained(MODEL_NAME)
-    tokenizer: WhisperTokenizer = processor.tokenizer
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--train_jsonl", type=Path, default=Path("HAT-Vol2/manifests_track1/train.jsonl"))
+    ap.add_argument("--dev_jsonl",   type=Path, default=Path("HAT-Vol2/manifests_track1/dev.jsonl"))
+    ap.add_argument("--root",        type=Path, default=Path("HAT-Vol2"), help="Root directory for joining relative audio paths")
+    ap.add_argument("--out_dir",     type=Path, default=Path("runs/track1/lora_v2_r16_e3"))
+    ap.add_argument("--base_model",  type=str, default="openai/whisper-large-v2")
+    # LoRA
+    ap.add_argument("--lora_r", type=int, default=16)
+    ap.add_argument("--lora_alpha", type=int, default=32)
+    ap.add_argument("--lora_dropout", type=float, default=0.05)
+    # Training
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--batch_size", type=int, default=2)
+    ap.add_argument("--eval_batch_size", type=int, default=4)
+    ap.add_argument("--grad_accum", type=int, default=16)
+    # Normalization switches
+    ap.add_argument("--strip_asterisk", action="store_true", help="Whether to remove '*' from training text (default: keep)")
+    ap.add_argument("--strip_punct", action="store_true", help="Whether to remove punctuation from training text (default: keep)")
+    args = ap.parse_args()
 
-    # （建議）pad_token 與 eos 對齊，避免 padding 警告
+    set_seed(1337)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    # dtype selection
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    try:
+        bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    except Exception:
+        bf16_ok = False
+    use_bf16 = bf16_ok
+    print(f"[INFO] Device={device}, bf16={use_bf16}")
+
+    # Processor & tokenizer
+    processor = WhisperProcessor.from_pretrained(args.base_model)
+    tokenizer: WhisperTokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 嘗試設定中文轉寫前綴（不同 transformers 版本 API 可能不同，故 try/except）
-    try:
-        # 只用於訓練時的 tokenizer 行為，不強制 generate 的 forced tokens
-        processor.tokenizer.set_prefix_tokens(language="zh", task="transcribe")
-    except Exception:
-        pass
-
-    # 模型：清空 forced/suppress，避免翻譯/時間戳/符號干擾
-    model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME)
+    # Model
+    model = WhisperForConditionalGeneration.from_pretrained(
+        args.base_model,
+        torch_dtype=(torch.bfloat16 if use_bf16 else None),
+        low_cpu_mem_usage=True,
+    )
+    # Common Whisper training settings
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()  # 省顯存
-    # 某些情況下搭配 LoRA + ckpt 需要
+    model.gradient_checkpointing_enable()
     try:
         model.enable_input_require_grads()
     except Exception:
         pass
 
-    # LoRA 設定
+    # LoRA
     lcfg = LoraConfig(
-        r=8, lora_alpha=16, lora_dropout=0.1,
+        r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
         bias="none", task_type="SPEECH_SEQ_2_SEQ",
     )
     model = get_peft_model(model, lcfg)
 
-    # 同步 generation 設定（避免被默認翻譯）
-    try:
-        if hasattr(model, "generation_config") and model.generation_config is not None:
-            model.generation_config.forced_decoder_ids = None
-            model.generation_config.suppress_tokens = []
-            model.generation_config.task = "transcribe"
-            model.generation_config.language = None
-    except Exception:
-        pass
+    # Dataset
+    keep_ast = not args.strip_asterisk
+    train_ds = JsonlASRDataset(args.train_jsonl, processor, args.root, keep_ast, args.strip_punct)
+    dev_ds   = JsonlASRDataset(args.dev_jsonl,   processor, args.root, keep_ast, args.strip_punct)
+    collator = DataCollator()
 
-    train_ds = JsonlASRDataset(TRAIN_JSONL, processor)
-    dev_ds   = JsonlASRDataset(DEV_JSONL, processor)
-    collator = DataCollator(processor)
-
-    # 解碼設定（eval 用 beam=5 較穩；最終可再試 1/8/10）
+    # Generation settings (for eval)
+    forced_ids = processor.get_decoder_prompt_ids(language="zh", task="transcribe")
     gen_kwargs = dict(
         do_sample=False,
         num_beams=5,
         length_penalty=1.0,
-        max_new_tokens=225,
+        max_new_tokens=256,
+        forced_decoder_ids=forced_ids,
+        suppress_tokens=[],
         return_dict_in_generate=False,
         output_scores=False,
     )
 
-    args = TrainingArguments(
-        output_dir=str(OUT_DIR),
-        per_device_train_batch_size=2,      # 24GB 卡建議起手式
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=16,     # 等效全域 batch 較大
-        learning_rate=5e-4,
-        num_train_epochs=3,                 # 先 3 個 epoch 快速落地
+    # TrainingArguments
+    args_hf = TrainingArguments(
+        output_dir=str(args.out_dir),
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.grad_accum,
+        learning_rate=args.lr,
+        num_train_epochs=args.epochs,
         warmup_steps=500,
-        fp16=True,
+        bf16=use_bf16,
+        fp16=(not use_bf16 and device=="cuda"),
         logging_steps=25,
         evaluation_strategy="epoch",
         save_strategy="epoch",
@@ -196,13 +254,11 @@ def main():
     )
 
     class CERTrainer(Trainer):
-        # 僅傳 Whisper 需要的鍵，避免傳成 input_ids
         def compute_loss(self, model, inputs, return_outputs=False):
             outputs = model(input_features=inputs["input_features"], labels=inputs["labels"])
             loss = outputs.loss
             return (loss, outputs) if return_outputs else loss
 
-        # 每個 epoch 用 generate 計算 CER
         def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix: str = "eval"):
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
             self.model.eval()
@@ -217,43 +273,39 @@ def main():
             with torch.no_grad():
                 for batch in loader:
                     feats = batch["input_features"].to(self.model.device, non_blocking=True)
-                    gen_ids = self.model.generate(
-                        input_features=feats, 
-                        forced_decoder_ids=None,
-                        suppress_tokens=[],
-                        **gen_kwargs
-                    )
-                    # 解碼為漢字
-                    texts = processor.batch_decode(gen_ids, skip_special_tokens=True)
-                    texts = [re.sub(r"\s+", "", t) for t in texts]  # 去多餘空白
-                    preds.extend(texts)
-
-                    # 參考
+                    # Feature dtype must align with model dtype
+                    model_dtype = next(self.model.parameters()).dtype
+                    feats = feats.to(dtype=model_dtype)
+                    ids = self.model.generate(input_features=feats, **gen_kwargs)
+                    hyp = processor.batch_decode(ids, skip_special_tokens=True)
+                    hyp = [normalize_hanzi(t, strip_spaces=True, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
+                           for t in hyp]
+                    # Reference
                     lab = batch["labels"].cpu().numpy()
                     lab[lab == -100] = tokenizer.pad_token_id
-                    ref_txts = processor.batch_decode(lab, skip_special_tokens=True)
-                    ref_txts = [re.sub(r"\s+", "", t) for t in ref_txts]
-                    refs.extend(ref_txts)
+                    ref = processor.batch_decode(lab, skip_special_tokens=True)
+                    ref = [normalize_hanzi(t, strip_spaces=True, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
+                           for t in ref]
+                    preds.extend(hyp); refs.extend(ref)
 
             cer = cer_metric(preds, refs)
-            metrics = {f"{metric_key_prefix}_cer": cer}
             print(f"[EVAL] CER={cer:.2f}%")
-            return metrics
+            return {f"{metric_key_prefix}_cer": cer}
 
     trainer = CERTrainer(
         model=model,
-        args=args,
+        args=args_hf,
         data_collator=collator,
         train_dataset=train_ds,
         eval_dataset=dev_ds,
-        tokenizer=processor,  # 用 processor（可保存 + 具備特徵與tokenizer）
+        tokenizer=processor,  # Let Trainer save processor (contains tokenizer + feature_extractor)
         compute_metrics=None,
     )
 
     trainer.train()
-    model.save_pretrained(OUT_DIR)      # 只存 LoRA adapter（小很多）
-    processor.save_pretrained(OUT_DIR)
-    print("[DONE] Track1 training finished. Adapter saved at", OUT_DIR)
+    model.save_pretrained(args.out_dir)      # Save LoRA adapter
+    processor.save_pretrained(args.out_dir)
+    print("[DONE] Track1 training finished. Adapter saved at", args.out_dir)
 
 if __name__ == "__main__":
     main()
