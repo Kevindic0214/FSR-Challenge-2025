@@ -49,7 +49,9 @@ def normalize_hanzi(text: str, strip_spaces=True, keep_asterisk=True, strip_punc
 
 # -------- I/O helpers --------
 def list_wavs(root_dir: str) -> List[str]:
-    wavs = sorted(glob.glob(os.path.join(root_dir, "**", "*.wav"), recursive=True))
+    # Use pathlib for better cross-platform support
+    root_path = Path(root_dir)
+    wavs = sorted([str(p) for p in root_path.rglob("*.wav")])
     if not wavs:
         print(f"[ERROR] No wav files found under directory: {root_dir}", file=sys.stderr)
         sys.exit(1)
