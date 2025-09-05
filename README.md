@@ -1,10 +1,10 @@
-# FSR-2025 Hakka ASR Challenge - Track 1 Implementation
+# FSR-2025 Hakka ASR Challenge - Complete Implementation
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Project Goal**: Participating in the **Formosa Speech Recognition Challenge 2025 - Hakka ASR II** to develop an automatic speech recognition system for Taiwanese Hakka (Track 1: Hanzi Recognition).
+> **Project Goal**: Participating in the **Formosa Speech Recognition Challenge 2025 - Hakka ASR II** to develop an automatic speech recognition system for Taiwanese Hakka with complete implementations for both tracks.
 
 ## 🎯 Challenge Overview
 
@@ -15,8 +15,10 @@
 
 ### Track Details
 
-* **Track 1 (Hanzi)**: Character Error Rate (CER) evaluation
-* **Track 2 (Pinyin)**: Syllable Error Rate (SER) evaluation *(separate implementation)*
+* **Track 1 (Hanzi)**: Character Error Rate (CER) evaluation - Chinese character recognition
+* **Track 2 (Pinyin)**: Syllable Error Rate (SER) evaluation - Romanized phonetic transcription
+
+Both tracks are fully implemented in this repository with dedicated training, inference, and evaluation pipelines.
 
 ### Data
 
@@ -29,22 +31,46 @@
 ```
 FSR-Challenge-2025/
 ├── 📊 Data Preparation
-│   └── prepare_hakka_track1.py          # Generate train/dev manifests
+│   ├── prepare_hakka_track1.py          # Generate train/dev manifests for hanzi
+│   └── prepare_hakka_track2.py          # Generate train/dev manifests for pinyin
 ├── 🎓 Training
-│   └── train_whisper_lora_track1.py     # Whisper-large-v2 + LoRA training
+│   ├── train_whisper_lora_track1.py     # Whisper-large-v2 + LoRA training (hanzi)
+│   └── train_whisper_lora_track2.py     # Whisper-large-v2 + LoRA training (pinyin)
 ├── 🔮 Inference
-│   └── infer_hakka_hanzi_warmup.py      # Batch inference for evaluation
+│   ├── infer_hakka_hanzi_warmup.py      # Batch inference for hanzi evaluation
+│   ├── infer_hakka_pinyin_warmup.py     # Batch inference for pinyin evaluation
+│   ├── infer_whisper_track2.py          # Alternative inference for track 2
+│   └── quick_infer_one.py               # Quick single-file inference
 ├── 📈 Evaluation
-│   └── eval_track1_cer.py               # CER evaluation with diagnostics
-├── 🚀 Pipeline Management
-│   ├── run_track1_pipeline.py           # Complete pipeline (Python)
-│   ├── run_track1_pipeline.sh           # Complete pipeline (Bash)
-│   ├── requirements.txt                 # Full dependencies
-│   └── requirements-minimal.txt         # Minimal dependencies
-└── 📁 Data Directories
-    ├── HAT-Vol2/                        # Training dataset
-    ├── FSR-2025-Hakka-evaluation/       # Evaluation dataset
-    └── FSR-2025-Hakka-evaluation-key/   # Ground truth labels
+│   ├── eval_track1_cer.py               # CER evaluation with diagnostics
+│   ├── eval_track2_ser.py               # SER evaluation for pinyin
+│   └── quick_ser_check.py               # Quick SER validation
+├── �️ Utilities
+│   ├── make_keyonly_track2.py           # Generate key-only files for track 2
+│   └── plot_loss.py                     # Training loss visualization
+├── �🚀 Pipeline Management
+│   ├── run_track1_pipeline.py           # Complete track 1 pipeline
+│   └── run_track1_pipeline.sh           # Complete track 1 pipeline (bash)
+├── 📁 Data Directories
+│   ├── HAT-Vol2/                        # Training dataset (~60H)
+│   │   ├── manifests_track1/            # Track 1 train/dev manifests
+│   │   ├── manifests_track2/            # Track 2 train/dev manifests
+│   │   ├── 訓練_大埔腔30H/              # Dapu dialect training audio
+│   │   ├── 訓練_詔安腔30H/              # Zhao'an dialect training audio
+│   │   └── *.csv                        # Training metadata files
+│   ├── FSR-2025-Hakka-evaluation/       # Evaluation dataset (~10H)
+│   │   ├── 熱身賽_媒體語料_大埔腔_1H/   # Dapu media corpus
+│   │   ├── 熱身賽_媒體語料_詔安腔_1H/   # Zhao'an media corpus
+│   │   ├── 熱身賽_錄製語料_大埔腔_4H/   # Dapu recorded corpus
+│   │   └── 熱身賽_錄製語料_詔安腔_4H/   # Zhao'an recorded corpus
+│   └── FSR-2025-Hakka-evaluation-key/   # Ground truth labels
+├── 📊 Experiments & Results
+│   ├── experiments_v2/                  # Version 2 experiment results
+│   ├── experiments_v3t/                 # Version 3t experiment results
+│   └── archive/                         # Previous experiments and submissions
+└── 📝 Documentation
+    ├── README.md                        # This file
+    └── *.md                            # Additional documentation
 ```
 
 ## 🚀 Quick Start
@@ -73,17 +99,31 @@ FSR-Challenge-2025/
 │   ├── 訓練_DM_大埔腔_男_edit.csv  
 │   ├── 訓練_ZF_詔安腔_女_edit.csv
 │   ├── 訓練_ZM_詔安腔_男_edit.csv
+│   ├── manifests_track1/            # Generated by prepare_hakka_track1.py
+│   ├── manifests_track2/            # Generated by prepare_hakka_track2.py
 │   ├── 訓練_大埔腔30H/
 │   └── 訓練_詔安腔30H/
 ├── FSR-2025-Hakka-evaluation/
+│   ├── 熱身賽_媒體語料_大埔腔_1H/
+│   ├── 熱身賽_媒體語料_詔安腔_1H/
+│   ├── 熱身賽_錄製語料_大埔腔_4H/
+│   └── 熱身賽_錄製語料_詔安腔_4H/
 └── FSR-2025-Hakka-evaluation-key/
+    ├── 熱身賽_媒體語料_大埔腔_edit.csv
+    ├── 熱身賽_媒體語料_詔安腔_edit.csv
+    ├── 熱身賽_錄製語料_DF_大埔腔_女_edit.csv
+    ├── 熱身賽_錄製語料_DM_大埔腔_男_edit.csv
+    ├── 熱身賽_錄製語料_ZF_詔安腔_女_edit.csv
+    └── 熱身賽_錄製語料_ZM_詔安腔_男_edit.csv
 ```
 
 ### 3. Run Complete Pipeline
 
-**Option A: Using Python Pipeline (Recommended)**
+**Track 1 (Hanzi Recognition)**
+
+*Option A: Using Python Pipeline (Recommended)*
 ```bash
-# Run complete pipeline (all stages)
+# Run complete track 1 pipeline (all stages)
 python run_track1_pipeline.py
 
 # Run specific stages only
@@ -93,14 +133,14 @@ python run_track1_pipeline.py --stage_start 1 --stage_end 2  # Data prep + train
 python run_track1_pipeline.py --dry_run
 ```
 
-**Option B: Using Bash Pipeline**
+*Option B: Using Bash Pipeline*
 ```bash
 chmod +x run_track1_pipeline.sh
 ./run_track1_pipeline.sh  # Run all stages
 ./run_track1_pipeline.sh 1 2  # Run stages 1-2 only
 ```
 
-**Option C: Manual Step-by-Step**
+*Option C: Manual Step-by-Step (Track 1)*
 ```bash
 # Stage 1: Data Preparation
 python prepare_hakka_track1.py --root HAT-Vol2 --drop_mispronounce
@@ -118,9 +158,51 @@ python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
     --hyp predictions.csv
 ```
 
+**Track 2 (Pinyin Recognition)**
+
+*Manual Step-by-Step (Track 2)*
+```bash
+# Stage 1: Data Preparation
+python prepare_hakka_track2.py --root HAT-Vol2 --drop_mispronounce
+
+# Stage 2: Training  
+python train_whisper_lora_track2.py --train_jsonl HAT-Vol2/manifests_track2/train.jsonl
+
+# Stage 3: Inference
+python infer_hakka_pinyin_warmup.py --eval_root FSR-2025-Hakka-evaluation \
+    --model openai/whisper-large-v2 --lora_dir runs/track2/lora_v2_r16_e3 \
+    --outfile predictions_pinyin.csv
+
+# Alternative inference method
+python infer_whisper_track2.py --eval_root FSR-2025-Hakka-evaluation \
+    --lora_dir runs/track2/lora_v2_r16_e3 --outfile predictions_pinyin.csv
+
+# Stage 4: Evaluation
+python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
+    --hyp predictions_pinyin.csv
+
+# Quick SER check
+python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
+```
+
+**Utility Scripts**
+```bash
+# Generate key-only files for track 2
+python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
+
+# Quick inference for a single file
+python quick_infer_one.py --audio_file path/to/audio.wav --model_dir runs/track1/model
+
+# Plot training loss
+python plot_loss.py --log_dir runs/track1/lora_v2_r16_e3
+```
+
 ## 📋 Detailed Component Description
 
-### 1. Data Preparation (`prepare_hakka_track1.py`)
+### 1. Data Preparation
+
+**Track 1: `prepare_hakka_track1.py`** - Hanzi Recognition Data
+**Track 2: `prepare_hakka_track2.py`** - Pinyin Recognition Data
 
 **Features:**
 - Scans and merges all `*_edit.csv` files from HAT-Vol2
@@ -128,6 +210,7 @@ python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
 - Balanced dev speaker selection across dialect groups (DF/DM/ZF/ZM)
 - Handles mispronunciation filtering and audio path validation
 - Outputs reproducible train/dev splits in JSONL format
+- Track-specific text processing (hanzi vs pinyin)
 
 **Key Parameters:**
 ```bash
@@ -140,10 +223,17 @@ python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
 
 **Output Format:**
 ```json
+# Track 1 (Hanzi)
 {"utt_id": "DF101K2001_001", "audio": "path/to/file.wav", "hanzi": "客語漢字", "text": "客語漢字", "group": "DF"}
+
+# Track 2 (Pinyin)  
+{"utt_id": "DF101K2001_001", "audio": "path/to/file.wav", "pinyin": "hag5 ngi3", "text": "hag5 ngi3", "group": "DF"}
 ```
 
-### 2. Training (`train_whisper_lora_track1.py`)
+### 2. Training
+
+**Track 1: `train_whisper_lora_track1.py`** - Hanzi Recognition Training
+**Track 2: `train_whisper_lora_track2.py`** - Pinyin Recognition Training
 
 **Model Architecture:**
 - Base model: `openai/whisper-large-v2`
@@ -169,10 +259,16 @@ warmup_steps = 500
 **Features:**
 - Automatic dtype detection (bfloat16 > float16 > float32)
 - Chinese transcription enforcement (prevents language drift)
-- CER-based evaluation during training
+- CER-based evaluation during training (Track 1) / SER-based evaluation (Track 2)
 - Compatible with 24GB GPU (RTX 4090)
+- Track-specific text processing and evaluation metrics
 
-### 3. Inference (`infer_hakka_hanzi_warmup.py`)
+### 3. Inference
+
+**Track 1: `infer_hakka_hanzi_warmup.py`** - Hanzi Recognition Inference
+**Track 2: `infer_hakka_pinyin_warmup.py`** - Pinyin Recognition Inference
+**Alternative: `infer_whisper_track2.py`** - Alternative Track 2 Inference
+**Utility: `quick_infer_one.py`** - Single File Quick Inference
 
 **Input Modes:**
 - Directory scanning: Recursively finds `*.wav` files
@@ -189,52 +285,76 @@ warmup_steps = 500
 ```
 
 **Features:**
-- Forced Chinese decoding (language="zh", task="transcribe")
+- Forced Chinese decoding (language="zh", task="transcribe") for Track 1
+- Language-appropriate decoding for Track 2 (pinyin output)
 - Robust audio loading and resampling
 - Batch processing with progress tracking
 - Optional per-utterance logging
+- Track-specific output formatting
 
-### 4. Evaluation (`eval_track1_cer.py`)
+### 4. Evaluation
+
+**Track 1: `eval_track1_cer.py`** - Character Error Rate Evaluation
+**Track 2: `eval_track2_ser.py`** - Syllable Error Rate Evaluation  
+**Utility: `quick_ser_check.py`** - Quick SER Validation
 
 **Evaluation Modes:**
 - **Manifest mode**: Compare against JSONL reference
 - **Key mode**: Compare against official CSV keys
 
 **Metrics:**
-- **CER**: Character Error Rate using Levenshtein distance
-- **Exact Match**: Sentence-level exact match percentage
+- **CER** (Track 1): Character Error Rate using Levenshtein distance
+- **SER** (Track 2): Syllable Error Rate for pinyin transcription
+- **Exact Match**: Sentence-level exact match percentage for both tracks
 
 **Advanced Features:**
 ```bash
+# Track 1 specific
 --probe_variants           # Test simplified/traditional variants
+--convert_hyp s2t          # Convert hypothesis for diagnosis
+
+# Both tracks
 --dump_err errors.jsonl    # Export error analysis
 --aligned_out aligned.csv  # Per-utterance results
---convert_hyp s2t          # Convert hypothesis for diagnosis
 ```
 
 **Diagnostic Output:**
-- Character distribution analysis (Han/Latin/Digit/Other)
+- Character/syllable distribution analysis
 - Per-utterance error breakdown
-- Simplified/Traditional Chinese variant testing
+- Simplified/Traditional Chinese variant testing (Track 1)
+- Pinyin syllable accuracy analysis (Track 2)
+
+### 5. Utilities
+
+**`make_keyonly_track2.py`** - Generate key-only files for Track 2 submissions
+**`plot_loss.py`** - Visualize training loss curves from tensorboard logs
+**`quick_infer_one.py`** - Quick inference for single audio files
+**`quick_ser_check.py`** - Quick SER validation for Track 2
 
 ## 🔧 Configuration & Customization
 
 ### Text Normalization
 
-All scripts use consistent `normalize_hanzi()` function:
-- Unicode NFKC normalization
-- Zero-width character removal
-- Punctuation standardization  
-- Optional space/asterisk/punctuation removal
+All scripts use consistent normalization functions:
+- `normalize_hanzi()` for Track 1: Unicode NFKC normalization, zero-width character removal, punctuation standardization
+- `normalize_pinyin()` for Track 2: Pinyin-specific normalization, tone marker handling
+- Optional space/asterisk/punctuation removal for both tracks
 
 ### Model Configuration
 
 Default paths and settings can be customized:
 ```python
-# In train_whisper_lora_track1.py
---base_model "openai/whisper-large-v2"    # Can use whisper-large-v3-turbo
---out_dir "runs/track1/lora_v2_r16_e3"    # Model output directory
---lora_r 16 --lora_alpha 32               # LoRA hyperparameters
+# Track 1 Training
+python train_whisper_lora_track1.py \
+    --base_model "openai/whisper-large-v2" \
+    --out_dir "runs/track1/lora_v2_r16_e3" \
+    --lora_r 16 --lora_alpha 32
+
+# Track 2 Training  
+python train_whisper_lora_track2.py \
+    --base_model "openai/whisper-large-v2" \
+    --out_dir "runs/track2/lora_v2_r16_e3" \
+    --lora_r 16 --lora_alpha 32
 ```
 
 ### Pipeline Configuration
@@ -258,11 +378,18 @@ Create custom config for `run_track1_pipeline.py`:
 
 ## 📊 Performance & Results
 
-### Current Baseline Performance
-- **Model**: Whisper-large-v2 + LoRA (r=16, α=32)
+### Current Implementation Status
+- **Track 1 (Hanzi)**: ✅ Complete pipeline with CER evaluation
+- **Track 2 (Pinyin)**: ✅ Complete pipeline with SER evaluation
+- **Model**: Whisper-large-v2 + LoRA (r=16, α=32) for both tracks
 - **Training**: 3 epochs on HAT-Vol2 (~27K utterances)
 - **Hardware**: RTX 4090 24GB
 - **Evaluation**: FSR-2025-Hakka-evaluation warm-up set
+
+### Experiment Versions
+- **experiments_v2/**: Version 2 results with beam search comparisons
+- **experiments_v3t/**: Version 3t results with temperature tuning
+- **archive/v2_lora/**: Archived submissions and detailed evaluation results
 
 ### Hardware Requirements
 - **Minimum**: 8GB GPU memory (reduce batch_size to 1)
@@ -270,8 +397,8 @@ Create custom config for `run_track1_pipeline.py`:
 - **Optimal**: 24GB+ GPU memory (RTX 4090/A6000/H100)
 
 ### Training Time Estimates
-- **Data preparation**: ~2 minutes
-- **Training (3 epochs)**: ~2-4 hours (RTX 4090)
+- **Data preparation**: ~2 minutes (both tracks)
+- **Training (3 epochs)**: ~2-4 hours per track (RTX 4090)
 - **Inference**: ~10 minutes (4K utterances)
 - **Evaluation**: ~30 seconds
 
@@ -283,18 +410,29 @@ Create custom config for `run_track1_pipeline.py`:
 ```bash
 # Reduce batch size and increase gradient accumulation
 python train_whisper_lora_track1.py --batch_size 1 --grad_accum 32
+python train_whisper_lora_track2.py --batch_size 1 --grad_accum 32
 ```
 
 **2. Audio File Not Found**
 ```bash
 # Use absolute paths or ensure relative path resolution
 python prepare_hakka_track1.py --relative_audio_path
+python prepare_hakka_track2.py --relative_audio_path
 ```
 
 **3. Text Normalization Inconsistency**
 ```bash
 # All scripts use same normalization - check parameters match between stages
---strip_asterisk    # Should be consistent in train/infer/eval
+--strip_asterisk    # Should be consistent in train/infer/eval for both tracks
+```
+
+**4. Track 2 SER Evaluation Issues**
+```bash
+# Use quick SER check for debugging
+python quick_ser_check.py --hyp predictions.csv --ref reference.csv
+
+# Generate key-only files if needed
+python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
 ```
 
 ### Debug Mode
@@ -304,41 +442,65 @@ Enable detailed logging:
 # Add debug logging to any script
 python <script>.py --verbose
 
-# Monitor training with tensorboard  
+# Monitor training with tensorboard (both tracks)
 tensorboard --logdir runs/track1/lora_v2_r16_e3
+tensorboard --logdir runs/track2/lora_v2_r16_e3
+
+# Plot training loss
+python plot_loss.py --log_dir runs/track1/lora_v2_r16_e3
 ```
 
 ## 🔍 Error Analysis & Diagnostics
 
 ### Detailed Error Analysis
 ```bash
-# Generate comprehensive error breakdown
+# Track 1: Generate comprehensive CER error breakdown
 python eval_track1_cer.py \
     --key_dir FSR-2025-Hakka-evaluation-key \
     --hyp predictions.csv \
     --dump_err errors.jsonl \
     --aligned_out aligned.csv \
     --probe_variants
+
+# Track 2: Generate comprehensive SER error breakdown
+python eval_track2_ser.py \
+    --key_dir FSR-2025-Hakka-evaluation-key \
+    --hyp predictions_pinyin.csv \
+    --dump_err errors_ser.jsonl \
+    --aligned_out aligned_ser.csv
 ```
 
-### Character-level Analysis
+### Character-level Analysis (Track 1)
 The evaluation script provides:
 - Character distribution in predictions (Han/Latin/Digit/Other ratios)
 - First character difference position for each error
 - Simplified vs Traditional Chinese variant impact
 
+### Syllable-level Analysis (Track 2)  
+The evaluation script provides:
+- Syllable boundary detection accuracy
+- Tone marker prediction accuracy
+- Phoneme-level error patterns
+
 ### Per-utterance Results
-Check `aligned.csv` for:
-- Individual utterance CER scores
+Check `aligned.csv` (Track 1) or `aligned_ser.csv` (Track 2) for:
+- Individual utterance CER/SER scores
 - Reference vs hypothesis alignment
 - Length statistics and error counts
+- Track-specific metrics and analysis
 
 ## 🚀 Advanced Usage
 
 ### Custom Model Training
 ```bash
-# Train with different base model
+# Train Track 1 with different base model
 python train_whisper_lora_track1.py \
+    --base_model "openai/whisper-large-v3-turbo" \
+    --lora_r 32 --lora_alpha 64 \
+    --epochs 5 --lr 5e-5
+
+# Train Track 2 with custom settings
+python train_whisper_lora_track2.py \
     --base_model "openai/whisper-large-v3-turbo" \
     --lora_r 32 --lora_alpha 64 \
     --epochs 5 --lr 5e-5
@@ -350,19 +512,27 @@ python train_whisper_lora_track1.py \
 
 ### Batch Inference with Custom Settings  
 ```bash
-# Use different decoding strategy
+# Track 1: Use different decoding strategy
 python infer_hakka_hanzi_warmup.py \
     --eval_root FSR-2025-Hakka-evaluation \
     --lora_dir runs/track1/lora_v2_r16_e3 \
     --outfile predictions.csv \
     --beams 5 --temperature 0.1 --length_penalty 1.2
+
+# Track 2: Use alternative inference method
+python infer_whisper_track2.py \
+    --eval_root FSR-2025-Hakka-evaluation \
+    --lora_dir runs/track2/lora_v2_r16_e3 \
+    --outfile predictions_pinyin.csv \
+    --beams 3 --temperature 0.0
 ```
 
 ### Multi-GPU Training
 ```bash
-# Use accelerate for multi-GPU training
+# Use accelerate for multi-GPU training (both tracks)
 accelerate config  # Configure multi-GPU setup
 accelerate launch train_whisper_lora_track1.py <args>
+accelerate launch train_whisper_lora_track2.py <args>
 ```
 
 ## 📚 Dependencies
@@ -410,8 +580,12 @@ For issues and questions:
 *Working towards preserving Taiwanese Hakka culture through technology* 💪
 
 **Competition Status**: 
-- ✅ Data preparation pipeline
-- ✅ Training infrastructure  
-- ✅ Inference system
-- ✅ Evaluation framework
+- ✅ Track 1: Complete hanzi recognition pipeline
+- ✅ Track 2: Complete pinyin recognition pipeline  
+- ✅ Data preparation for both tracks
+- ✅ Training infrastructure for both tracks
+- ✅ Inference systems for both tracks
+- ✅ Evaluation frameworks (CER & SER)
+- ✅ Error analysis and diagnostics
 - 🚧 Performance optimization ongoing
+- 📊 Multiple experiment versions available
