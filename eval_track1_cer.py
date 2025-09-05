@@ -2,226 +2,339 @@
 # -*- coding: utf-8 -*-
 
 """
-Track1 (Hanzi) CER evaluator for FSR-2025 Hakka ASR warm-up.
-- Aggregates ALL *_edit.csv under --key_dir
-- Uses the '客語漢字' column as reference
-- Aligns by basename with extension (e.g., 'xxx.wav'); also tolerates stem-only IDs from predictions
-- Normalization: NFKC -> remove zero-width -> remove all whitespace -> (default) remove '*'
-- Missing predictions are treated as empty string (counted as deletions)
-- Outputs micro-averaged CER plus optional per-utterance details
+FSR-2025 Track 1 (Hanzi) Evaluation - R2.1
+
+Modes:
+  A) Manifest mode: --ref <manifest.jsonl> + --hyp <pred.csv>
+  B) Key mode:      --key_csv <key.csv> or --key_dir <dir> + --hyp <pred.csv>
+
+Normalization (aligned with prepare/infer):
+  - Unicode NFKC -> remove zero-width -> remove spaces
+  - Default KEEP '*' (use --strip_asterisk to remove)
+  - Default keep punctuation (use --strip_punct to remove)
+
+New (diagnostic):
+  - --probe_variants : report CER under {AS-IS, unify-to-simplified, unify-to-traditional}
+  - --convert_hyp {none,s2t,t2s} : convert hypothesis only (for diagnosis)
+  - Character profile of HYP (Han/Latin/Digit/Other ratio)
+
+Outputs:
+  - CER, Exact-Match
+  - Optional --dump_err JSONL, --aligned_out CSV
 """
 
 import argparse
 import csv
-import glob
-import os
-import re
+import json
 import sys
+import re
 import unicodedata
-from collections import OrderedDict
+from pathlib import Path
+from typing import Dict, Tuple, List, Optional
 
-# ---------- Normalization helpers ----------
+# ---------- Optional OpenCC ----------
+_CC = None
+def _try_init_opencc():
+    global _CC
+    if _CC is not None:
+        return
+    try:
+        from opencc import OpenCC
+        _CC = {
+            "s2t": OpenCC("s2t"),
+            "t2s": OpenCC("t2s"),
+        }
+    except Exception:
+        _CC = {}
 
-ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+def conv_zh(s: str, mode: Optional[str]) -> str:
+    """mode in {None,'s2t','t2s'}; returns s if converter missing."""
+    if not s or not mode:
+        return s
+    _try_init_opencc()
+    cc = _CC.get(mode)
+    if cc is None:
+        return s
+    try:
+        return cc.convert(s)
+    except Exception:
+        return s
 
-def is_punct(ch: str) -> bool:
-    """Unicode punctuation check."""
-    cat = unicodedata.category(ch)
-    if cat and cat.startswith("P"):
-        return True
-    # Some common symbols which are not strictly 'P*' but often treated as punct
-    return ch in "·•…—–‐-·•()[]{}<>《》〈〉「」『』“”\"'、，。！？；：．"
-
-def norm_hanzi(s: str, keep_star: bool = False, strip_punct: bool = False) -> str:
-    """NFKC -> remove zero-width -> remove whitespace -> optionally strip '*' and punctuation."""
-    if s is None:
+# ---------- Normalization (align with prepare/infer) ----------
+_ZW_CHARS_RE = re.compile(r"[\u200B-\u200F\uFEFF]")
+_PUNCT_TABLE = str.maketrans({
+    "，":"，","。":"。","、":"、","！":"！","？":"！","；":"；","：":"：",
+    "（":"（","）":"）","「":"「","」":"」","『":"『","』":"』",
+    ",":"，",".":"。","!":"！","?":"？",";":"；",":":"：",
+    "(":"（",")":"）","[":"（","]":"）","{":"（","}":"）",
+    "—":"－","–":"－","-":"－",
+})
+def normalize_hanzi(text: str, strip_spaces=True, keep_asterisk=True, strip_punct=False) -> str:
+    if not text:
         return ""
-    s = unicodedata.normalize("NFKC", s)
-    s = ZERO_WIDTH_RE.sub("", s)
-    # remove ALL whitespace
-    s = "".join(s.split())
-    if not keep_star:
-        s = s.replace("*", "")
+    t = unicodedata.normalize("NFKC", text)
+    t = _ZW_CHARS_RE.sub("", t)
+    t = t.translate(_PUNCT_TABLE)
+    if strip_spaces:
+        t = re.sub(r"\s+", "", t)
+    if not keep_asterisk:
+        t = t.replace("*", "")
     if strip_punct:
-        s = "".join(ch for ch in s if not is_punct(ch))
-    return s
+        t = re.sub(r"[，。、！？」；：「『』（）－,\.!\?:;\[\]\{\}\(\)\"']", "", t)
+    return t
 
-# ---------- Distance ----------
-
-def levenshtein_char(a: str, b: str) -> int:
-    """Memory-optimized Levenshtein distance at char level."""
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
+# ---------- Levenshtein ----------
+def levenshtein(a: str, b: str) -> int:
+    la, lb = len(a), len(b)
+    if la == 0: return lb
+    if lb == 0: return la
+    prev = list(range(lb + 1))
+    curr = [0]*(lb + 1)
+    for i in range(1, la + 1):
+        curr[0] = i
+        ca = a[i-1]
+        for j in range(1, lb + 1):
+            cb = b[j-1]
             cost = 0 if ca == cb else 1
-            cur.append(min(prev[j] + 1,     # deletion
-                           cur[j - 1] + 1,  # insertion
-                           prev[j - 1] + cost))  # substitution
-        prev = cur
-    return prev[-1]
+            curr[j] = min(prev[j] + 1, curr[j-1] + 1, prev[j-1] + cost)
+        prev, curr = curr, prev
+    return prev[lb]
 
-# ---------- IO ----------
+def first_diff_index(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n if len(a) != len(b) else -1
 
-def ingest_key_dir(key_dir: str, debug_headers: bool = False) -> OrderedDict:
-    """
-    Aggregate ALL *_edit.csv under key_dir and return OrderedDict[id_with_ext -> hanzi_ref].
-    Requirements per file: columns '檔名' and '客語漢字'.
-    If duplicates occur across files, the first occurrence is kept.
-    """
-    paths = sorted(glob.glob(os.path.join(key_dir, "*_edit.csv")))
-    if not paths:
-        print(f"[ERROR] No *_edit.csv found in {key_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    refs = OrderedDict()
-    per_file_counts = []
-    dup_ids = 0
-    used_files = 0
-
-    for p in paths:
-        with open(p, "r", encoding="utf-8-sig", newline="") as f:
-            rdr = csv.DictReader(f)
-            fields = rdr.fieldnames or []
-            if debug_headers:
-                print(f"[DEBUG] {os.path.basename(p)} fields: {fields}")
-
-            if ("檔名" not in fields) or ("客語漢字" not in fields):
-                # Skip files that do not contain Hanzi reference column
-                continue
-
-            used_files += 1
-            count = 0
-            for row in rdr:
-                fn = (row.get("檔名") or "").strip()
-                uid_ext = os.path.basename(fn)  # keep .wav to match submission
-                hz = (row.get("客語漢字") or "").strip()
-                if not uid_ext:
-                    continue
-                if uid_ext in refs:
-                    dup_ids += 1
-                    continue
-                refs[uid_ext] = hz
-                count += 1
-            per_file_counts.append((os.path.basename(p), count))
-
-    if not refs:
-        print(f"[ERROR] No Hanzi refs found under {key_dir} (no '客語漢字' column?).", file=sys.stderr)
-        sys.exit(1)
-
-    summary = ", ".join([f"{name}:{cnt}" for name, cnt in per_file_counts if cnt > 0]) or "none"
-    print(f"[INFO] Loaded {len(refs)} Hanzi refs from {used_files} files: {summary}")
-    if dup_ids > 0:
-        print(f"[INFO] Ignored {dup_ids} duplicate IDs (first occurrence kept).")
-    return refs
-
-def read_pred_csv(pred_csv: str) -> tuple[dict, set]:
-    """
-    Read predictions CSV with two columns: (filename, hypothesis)
-    - Supports optional header (e.g., '錄音檔檔名,辨認結果')
-    - Returns:
-        preds_map: dict mapping BOTH 'basename.ext' AND 'stem' to the hypothesis
-        raw_ids_with_ext: set of the actual IDs (basename.ext) found in the CSV (for 'extra' reporting)
-    """
-    preds_map = {}
-    raw_ids_with_ext = set()
-
-    with open(pred_csv, "r", encoding="utf-8-sig", newline="") as f:
+# ---------- Loaders ----------
+def load_hyp_csv(path: Path) -> Dict[str, str]:
+    hyp: Dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
         rdr = csv.reader(f)
         rows = list(rdr)
-
-    start = 0
-    if rows:
-        head = "".join(rows[0]).lower()
-        if any(k in head for k in ["錄音", "檔名", "file", "filename", "id", "sent"]):
-            start = 1
-
+    if not rows:
+        return hyp
+    header = rows[0]
+    start = 1 if any(h for h in header) else 0
+    def idx(names, default):
+        for n in names:
+            if n in header:
+                return header.index(n)
+        return default
+    c_fn = idx(["錄音檔檔名","檔名","filename","file","id"], 0)
+    c_tx = idx(["辨認結果","結果","hyp","prediction","text"], 1)
     for r in rows[start:]:
-        if not r:
-            continue
-        first = (r[0] or "").strip()
-        uid_ext = os.path.basename(first)   # prefer with extension (.wav)
-        uid_stem = os.path.splitext(uid_ext)[0]
-        hyp = ",".join(r[1:]).strip() if len(r) > 1 else ""
-        if uid_ext:
-            raw_ids_with_ext.add(uid_ext)
-            preds_map[uid_ext] = hyp
-            # also allow stem key for robustness
-            if uid_stem not in preds_map:
-                preds_map[uid_stem] = hyp
+        if not r: continue
+        fn = (r[c_fn] or "").strip()
+        if not fn: continue
+        tx = ",".join(r[c_tx:]).strip() if c_tx < len(r) else ""
+        hyp[Path(fn).name] = tx
+    return hyp
 
-    return preds_map, raw_ids_with_ext
+def load_ref_from_manifest(jsonl_path: Path) -> Dict[str, str]:
+    ref: Dict[str, str] = {}
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip(): continue
+            ex = json.loads(line)
+            utt_id = (ex.get("utt_id") or "").strip()
+            txt = (ex.get("text") or ex.get("hanzi") or "").strip()
+            if not utt_id:
+                audio = (ex.get("audio") or "").strip()
+                if audio:
+                    utt_id = Path(audio).stem
+                else:
+                    continue
+            key = utt_id if utt_id.endswith(".wav") else (utt_id + ".wav")
+            ref[key] = txt
+    return ref
+
+def _read_csv_rows(path: Path) -> List[List[str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        rdr = csv.reader(f)
+        return list(rdr)
+
+def load_ref_from_key_csv(csv_path: Path) -> Dict[str, str]:
+    rows = _read_csv_rows(csv_path)
+    ref: Dict[str, str] = {}
+    if not rows:
+        return ref
+    header = rows[0]
+    start = 1 if any(h for h in header) else 0
+    def idx(names, default):
+        for n in names:
+            if n in header:
+                return header.index(n)
+        return default
+    c_fn = idx(["錄音檔檔名","檔名","filename","file","id"], 0)
+    c_tx = idx(["正解","客語漢字","標註","text"], 1)
+    for r in rows[start:]:
+        if not r: continue
+        ref[Path((r[c_fn] or "").strip()).name] = (r[c_tx] or "").strip()
+    return ref
+
+def load_ref_from_key_dir(key_dir: Path) -> Dict[str, str]:
+    csvs = sorted(key_dir.glob("*.csv"))
+    if len(csvs) == 1:
+        return load_ref_from_key_csv(csvs[0])
+    refs: Dict[str, str] = {}
+    dup, used = 0, 0
+    for p in sorted(key_dir.glob("*_edit.csv")):
+        rows = _read_csv_rows(p)
+        if not rows: continue
+        header = rows[0]
+        if ("檔名" not in header) or ("客語漢字" not in header):
+            continue
+        used += 1
+        c_fn, c_tx = header.index("檔名"), header.index("客語漢字")
+        for r in rows[1:]:
+            if not r: continue
+            key = Path((r[c_fn] or "").strip()).name
+            txt = (r[c_tx] or "").strip()
+            if not key: continue
+            if key in refs: dup += 1; continue
+            refs[key] = txt
+    if not refs:
+        raise SystemExit(f"[ERROR] No refs found in {key_dir}")
+    print(f"[INFO] Loaded {len(refs)} refs from {used} files in {key_dir} (duplicates ignored: {dup})")
+    return refs
+
+# ---------- Diagnostics ----------
+_HAN_RE = re.compile(r"[\u4E00-\u9FFF\u3400-\u4DBF]")
+_LAT_RE = re.compile(r"[A-Za-z]")
+_DIG_RE = re.compile(r"[0-9]")
+def profile_text(s: str) -> Tuple[int,int,int,int]:
+    han = len(_HAN_RE.findall(s))
+    lat = len(_LAT_RE.findall(s))
+    dig = len(_DIG_RE.findall(s))
+    oth = max(0, len(s) - han - lat - dig)
+    return han, lat, dig, oth
+
+def profile_hyp(hyp: Dict[str,str], sample: int = 50):
+    keys = list(hyp.keys())[:sample]
+    han=lat=dig=oth=0
+    for k in keys:
+        h = hyp[k]
+        a,b,c,d = profile_text(h)
+        han+=a; lat+=b; dig+=c; oth+=d
+    tot = max(1, han+lat+dig+oth)
+    print(f"[DIAG] HYP profile (first {len(keys)} utts): Han={han/tot:.2%}, Latin={lat/tot:.2%}, Digit={dig/tot:.2%}, Other={oth/tot:.2%}")
+
+# ---------- Evaluation ----------
+def evaluate(ref: Dict[str,str], hyp: Dict[str,str],
+             keep_asterisk: bool, strip_punct: bool,
+             dump_err: Optional[Path]=None, aligned_out: Optional[Path]=None):
+    total_ref_chars = total_edits = exact = 0
+    aligned_rows = []
+    err_f = dump_err.open("w", encoding="utf-8") if dump_err else None
+
+    for uid in sorted(ref.keys()):
+        r_raw = ref[uid]
+        h_raw = hyp.get(uid, "")
+        r = normalize_hanzi(r_raw, strip_spaces=True, keep_asterisk=keep_asterisk, strip_punct=strip_punct)
+        h = normalize_hanzi(h_raw, strip_spaces=True, keep_asterisk=keep_asterisk, strip_punct=strip_punct)
+        edits = levenshtein(r, h)
+        total_ref_chars += len(r)
+        total_edits += edits
+        exact += int(r == h)
+        if aligned_out:
+            cer_utt = (edits/len(r)) if len(r) > 0 else (0.0 if len(h)==0 else 1.0)
+            aligned_rows.append([uid, r, h, len(r), edits, f"{cer_utt:.6f}"])
+        if err_f and r != h:
+            err_f.write(json.dumps({
+                "utt_id": uid, "ref_raw": r_raw, "hyp_raw": h_raw,
+                "ref": r, "hyp": h, "ref_len": len(r), "edits": edits,
+                "first_diff": first_diff_index(r, h)
+            }, ensure_ascii=False) + "\n")
+
+    if err_f: err_f.close()
+    cer = (total_edits / total_ref_chars) if total_ref_chars > 0 else 0.0
+    em  = (exact / len(ref)) if ref else 0.0
+    if aligned_out:
+        aligned_out.parent.mkdir(parents=True, exist_ok=True)
+        with aligned_out.open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f); w.writerow(["utt_id","ref","hyp","ref_len","edits","utt_cer"])
+            aligned_rows.sort(key=lambda x: x[0]); w.writerows(aligned_rows)
+    return cer, em
+
+def print_summary(tag: str, cer: float, em: float):
+    print(f"[{tag}] CER = {cer:.4f} ({cer*100:.2f}%), EM = {em*100:.2f}%")
 
 # ---------- Main ----------
-
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate Track1 CER (Hanzi, char-level micro average).")
-    ap.add_argument("--key_dir", required=True, help="Directory containing *_edit.csv with columns: 檔名, 客語漢字")
-    ap.add_argument("--pred_csv", required=True, help="Your prediction CSV (filename,hypothesis)")
-    ap.add_argument("--keep_star", action="store_true", help="Keep '*' during scoring (default: remove)")
-    ap.add_argument("--strip_punct", action="store_true", help="Remove punctuation during scoring")
-    ap.add_argument("--aligned_out", default=None, help="Optional per-utterance CSV path")
-    ap.add_argument("--debug_headers", action="store_true", help="Print field names for each key CSV")
+    ap = argparse.ArgumentParser(description="Evaluate Track1 CER (Hanzi) with variant probing")
+    # Mode A
+    ap.add_argument("--ref", type=str, help="Manifest JSONL (fields: utt_id, text/hanzi)")
+    # Mode B
+    ap.add_argument("--key_csv", type=str, help="Official key CSV file")
+    ap.add_argument("--key_dir", type=str, help="Directory containing key CSV or *_edit.csv files")
+    # Predictions
+    ap.add_argument("--hyp", "--pred_csv", dest="pred_csv", required=True, help="Prediction CSV (錄音檔檔名,辨認結果)")
+    # Normalization toggles
+    ap.add_argument("--strip_asterisk", action="store_true", help="Strip '*' (default: keep)")
+    ap.add_argument("--strip_punct", action="store_true", help="Strip punctuation (default: keep)")
+    # Diagnostics
+    ap.add_argument("--probe_variants", action="store_true", help="Also report CER after unifying to Simplified/Traditional (requires opencc)")
+    ap.add_argument("--convert_hyp", choices=["none","s2t","t2s"], default="none", help="Convert hypothesis only (diagnostic)")
+    # Outputs
+    ap.add_argument("--dump_err", type=str, default=None, help="Per-utterance mismatch JSONL")
+    ap.add_argument("--aligned_out", type=str, default=None, help="Aligned CSV (ref/hyp/cer per utt)")
     args = ap.parse_args()
 
-    refs = ingest_key_dir(args.key_dir, debug_headers=args.debug_headers)  # uid_ext -> hanzi
-    preds, raw_pred_ids_ext = read_pred_csv(args.pred_csv)                 # map (uid_ext+stem) -> hyp, and raw ext IDs
+    # Load reference
+    ref_map: Dict[str,str] = {}
+    if args.ref:
+        ref_map = load_ref_from_manifest(Path(args.ref))
+    elif args.key_csv:
+        ref_map = load_ref_from_key_csv(Path(args.key_csv))
+    elif args.key_dir:
+        ref_map = load_ref_from_key_dir(Path(args.key_dir))
+    else:
+        print("[ERROR] Provide one of: --ref | --key_csv | --key_dir", file=sys.stderr); sys.exit(1)
+    if not ref_map: print("[ERROR] No reference loaded.", file=sys.stderr); sys.exit(1)
 
-    total_ref_chars = 0
-    total_edits = 0
-    exact = 0
-    aligned_rows = []
+    # Load hypothesis
+    hyp_map = load_hyp_csv(Path(args.pred_csv))
+    if not hyp_map: print("[ERROR] No predictions loaded.", file=sys.stderr); sys.exit(1)
 
-    # Missing / extra reporting
-    missing_ids = [uid for uid in refs.keys() if uid not in raw_pred_ids_ext and os.path.splitext(uid)[0] not in preds]
-    extra_ids = [uid for uid in raw_pred_ids_ext if uid not in refs]
+    # Character profile (raw hyp)
+    profile_hyp(hyp_map, sample=min(50, len(hyp_map)))
 
-    for uid_ext, ref_raw in refs.items():
-        ref = norm_hanzi(ref_raw, keep_star=args.keep_star, strip_punct=args.strip_punct)
-        # Try matching by ext first, then by stem
-        hyp_raw = preds.get(uid_ext, preds.get(os.path.splitext(uid_ext)[0], ""))
-        hyp = norm_hanzi(hyp_raw, keep_star=args.keep_star, strip_punct=args.strip_punct)
+    # Optional convert only hyp (diagnostic)
+    conv_mode = None if args.convert_hyp == "none" else args.convert_hyp
+    if conv_mode:
+        _try_init_opencc()
+        if not _CC:
+            print("[WARN] opencc not installed; skipping --convert_hyp. Try: pip install opencc-python-reimplemented")
+        else:
+            hyp_map = {k: conv_zh(v, conv_mode) for k,v in hyp_map.items()}
+            print(f"[INFO] Applied hyp conversion: {conv_mode}")
 
-        edits = levenshtein_char(ref, hyp)
-        total_ref_chars += len(ref)
-        total_edits += edits
-        if ref == hyp:
-            exact += 1
+    keep_ast = not args.strip_asterisk
+    dump_err = Path(args.dump_err) if args.dump_err else None
+    aligned_out = Path(args.aligned_out) if args.aligned_out else None
 
-        if args.aligned_out:
-            rlen = len(ref)
-            cer_utt = (edits / rlen) if rlen > 0 else (0.0 if len(hyp) == 0 else 1.0)
-            aligned_rows.append([uid_ext, ref, hyp, rlen, edits, f"{cer_utt:.6f}"])
+    # AS-IS
+    cer, em = evaluate(ref_map, hyp_map, keep_asterisk=keep_ast, strip_punct=args.strip_punct,
+                       dump_err=dump_err, aligned_out=aligned_out)
+    print_summary("AS-IS", cer, em)
 
-    cer = (total_edits / total_ref_chars) if total_ref_chars > 0 else 0.0
-    em_rate = exact / len(refs) if refs else 0.0
+    # Variant probe (unify both sides)
+    if args.probe_variants:
+        _try_init_opencc()
+        if not _CC:
+            print("[WARN] opencc not installed; skipping --probe_variants. Try: pip install opencc-python-reimplemented")
+        else:
+            ref_s = {k: conv_zh(v, "t2s") for k,v in ref_map.items()}
+            hyp_s = {k: conv_zh(v, "t2s") for k,v in hyp_map.items()}
+            cer_s, em_s = evaluate(ref_s, hyp_s, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
+            print_summary("UNIFY→SIMP", cer_s, em_s)
 
-    print("==== Track1 Hanzi CER ====")
-    print(f"UTT            = {len(refs)}")
-    print(f"REF_CHARS      = {total_ref_chars}")
-    print(f"TOTAL_EDITS    = {total_edits}")
-    print(f"CER            = {cer:.4f} ({cer*100:.2f}%)")
-    print(f"Exact-Match    = {em_rate*100:.2f}%")
-
-    if missing_ids:
-        print(f"[WARN] Missing predictions: {len(missing_ids)} (counted as deletions).")
-    if extra_ids:
-        print(f"[INFO] Extra predictions (ignored): {len(extra_ids)})")
-
-    if args.aligned_out:
-        # stable sort by uid for deterministic output
-        aligned_rows.sort(key=lambda x: x[0])
-        with open(args.aligned_out, "w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["utt_id", "ref", "hyp", "ref_len", "edits", "utt_cer"])
-            w.writerows(aligned_rows)
-        print(f"[INFO] Wrote aligned details to {args.aligned_out}")
+            ref_t = {k: conv_zh(v, "s2t") for k,v in ref_map.items()}
+            hyp_t = {k: conv_zh(v, "s2t") for k,v in hyp_map.items()}
+            cer_t, em_t = evaluate(ref_t, hyp_t, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
+            print_summary("UNIFY→TRAD", cer_t, em_t)
 
 if __name__ == "__main__":
     main()
