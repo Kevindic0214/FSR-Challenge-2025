@@ -7,3 +7,4 @@ exp_track2_whisper_large_lora/
 *.csv
 *.txt
 *.tsv
+*.jsonl
