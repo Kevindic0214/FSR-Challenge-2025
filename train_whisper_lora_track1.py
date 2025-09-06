@@ -2,15 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Whisper-large-v2 + LoRA for Track 1 (Hakka Hanzi) — R3
+Whisper-large-v2 + LoRA for Track 1 (Hakka Hanzi) — R3.1
 
 - Read JSONL manifest (each line contains {"utt_id","audio","text"} or {"utt_id","audio","hanzi"})
 - Consistent normalization with prepare/infer/eval (default keep '*', keep punctuation)
 - Evaluation metric: CER (beam=5, forced Chinese transcription)
 - 24GB GPU friendly: LoRA + gradient checkpointing + TF32 + bf16 (auto-detection)
 """
-
-import os, json, re, argparse
+import os
+import json
+import argparse
+import unicodedata
+import re as _re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -19,7 +22,7 @@ import torch
 import torchaudio
 
 from transformers import (
-    WhisperForConditionalGeneration, WhisperProcessor, WhisperTokenizer,
+    WhisperForConditionalGeneration, WhisperProcessor, WhisperTokenizer, EarlyStoppingCallback,
     TrainingArguments, Trainer, set_seed
 )
 from peft import LoraConfig, get_peft_model
@@ -32,7 +35,6 @@ torch.backends.cudnn.allow_tf32 = True
 SR = 16000
 
 # ---------- Normalization (aligned with prepare/infer/eval) ----------
-import unicodedata
 _PUNCT_TABLE = str.maketrans({
     "，":"，","。":"。","、":"、","！":"！","？":"？","；":"；","：":"：",
     "（":"（","）":"）","「":"「","」":"」","『":"『","』":"』",
@@ -40,7 +42,6 @@ _PUNCT_TABLE = str.maketrans({
     "(":"（",")":"）","[":"（","]":"）","{":"（","}":"）",
     "—":"－","–":"－","-":"－",
 })
-import re as _re
 _ZW_CHARS_RE = _re.compile(r"[\u200B-\u200F\uFEFF]")
 def normalize_hanzi(text: str, strip_spaces=True, keep_asterisk=True, strip_punct=False) -> str:
     if not text:
@@ -126,8 +127,8 @@ class DataCollator:
 def cer_metric(preds: List[str], refs: List[str]) -> float:
     def ed(a: str, b: str) -> int:
         la, lb = len(a), len(b)
-        if la == 0: return lb
-        if lb == 0: return la
+        if la == 0: return lb  # noqa: E701
+        if lb == 0: return la  # noqa: E701
         prev = list(range(lb + 1))
         curr = [0]*(lb + 1)
         for i in range(1, la + 1):
@@ -163,6 +164,10 @@ def main():
     ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--eval_batch_size", type=int, default=4)
     ap.add_argument("--grad_accum", type=int, default=16)
+    ap.add_argument("--eval_strategy", choices=["epoch","steps"], default="epoch",
+                    help="When to run evaluation: per epoch or per steps")
+    ap.add_argument("--eval_steps", type=int, default=500,
+                    help="Run evaluation every N steps when --eval_strategy=steps")
     # Normalization switches
     ap.add_argument("--strip_asterisk", action="store_true", help="Whether to remove '*' from training text (default: keep)")
     ap.add_argument("--strip_punct", action="store_true", help="Whether to remove punctuation from training text (default: keep)")
@@ -193,8 +198,10 @@ def main():
         low_cpu_mem_usage=True,
     )
     # Common Whisper training settings
+    # model.config.forced_decoder_ids = None
+    # model.config.suppress_tokens = []
+    # Keep model defaults (incl. suppress_tokens); don't forcibly clear them
     model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
     try:
@@ -202,7 +209,7 @@ def main():
     except Exception:
         pass
 
-    # LoRA
+    # LoRA (always set up for training)
     lcfg = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
@@ -221,10 +228,12 @@ def main():
     gen_kwargs = dict(
         do_sample=False,
         num_beams=5,
+        temperature=0.0,
+        no_repeat_ngram_size=3,
         length_penalty=1.0,
         max_new_tokens=256,
         forced_decoder_ids=forced_ids,
-        suppress_tokens=[],
+        # suppress_tokens=[], # Keep model default
         return_dict_in_generate=False,
         output_scores=False,
     )
@@ -240,8 +249,11 @@ def main():
         warmup_steps=500,
         bf16=use_bf16,
         fp16=(not use_bf16 and device=="cuda"),
+        max_grad_norm=1.0,
+        label_smoothing_factor=0.1,
         logging_steps=25,
-        evaluation_strategy="epoch",
+        evaluation_strategy=args.eval_strategy,
+        eval_steps=(args.eval_steps if args.eval_strategy == "steps" else None),
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_cer",
@@ -263,6 +275,7 @@ def main():
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
             self.model.eval()
             preds, refs = [], []
+            total_loss, total_items = 0.0, 0
             loader = torch.utils.data.DataLoader(
                 eval_dataset,
                 batch_size=self.args.per_device_eval_batch_size,
@@ -276,21 +289,31 @@ def main():
                     # Feature dtype must align with model dtype
                     model_dtype = next(self.model.parameters()).dtype
                     feats = feats.to(dtype=model_dtype)
+                    # Eval loss (teacher-forced)
+                    labels = batch["labels"].to(self.model.device, non_blocking=True)
+                    out = self.model(input_features=feats, labels=labels)
+                    loss_val = float(out.loss.detach().cpu().item())
+                    bs = labels.size(0)
+                    total_loss += loss_val * bs
+                    total_items += bs
+                    # Generation for CER
                     ids = self.model.generate(input_features=feats, **gen_kwargs)
                     hyp = processor.batch_decode(ids, skip_special_tokens=True)
                     hyp = [normalize_hanzi(t, strip_spaces=True, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
                            for t in hyp]
-                    # Reference
+                    # Reference (for CER)
                     lab = batch["labels"].cpu().numpy()
                     lab[lab == -100] = tokenizer.pad_token_id
                     ref = processor.batch_decode(lab, skip_special_tokens=True)
                     ref = [normalize_hanzi(t, strip_spaces=True, keep_asterisk=keep_ast, strip_punct=args.strip_punct)
                            for t in ref]
-                    preds.extend(hyp); refs.extend(ref)
+                    preds.extend(hyp)
+                    refs.extend(ref)
 
             cer = cer_metric(preds, refs)
-            print(f"[EVAL] CER={cer:.2f}%")
-            return {f"{metric_key_prefix}_cer": cer}
+            eval_loss = (total_loss / max(1, total_items)) if total_items > 0 else 0.0
+            print(f"[EVAL] CER={cer:.2f}%  |  loss={eval_loss:.4f}")
+            return {f"{metric_key_prefix}_cer": cer, f"{metric_key_prefix}_loss": eval_loss}
 
     trainer = CERTrainer(
         model=model,
@@ -302,6 +325,7 @@ def main():
         compute_metrics=None,
     )
 
+    trainer.add_callback(EarlyStoppingCallback(early_stopping_patience=2))
     trainer.train()
     model.save_pretrained(args.out_dir)      # Save LoRA adapter
     processor.save_pretrained(args.out_dir)
