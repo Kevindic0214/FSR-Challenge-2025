@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Whisper-large-v2 + LoRA for Track 1 (Hakka Hanzi) — R3.1
+Whisper-large-v2 + LoRA for Track 1 (Hakka Hanzi) — R3.3
 
 - Read JSONL manifest (each line contains {"utt_id","audio","text"} or {"utt_id","audio","hanzi"})
 - Consistent normalization with prepare/infer/eval (default keep '*', keep punctuation)
@@ -14,6 +14,8 @@ import json
 import argparse
 import unicodedata
 import re as _re
+import time
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -97,6 +99,7 @@ class JsonlASRDataset(torch.utils.data.Dataset):
         if sr != SR:
             wav = torchaudio.functional.resample(wav, sr, SR)
         wav = wav.squeeze(0)
+        duration_sec = float(wav.numel()) / float(SR)
 
         feats = self.processor.feature_extractor(wav.numpy(), sampling_rate=SR, return_tensors="pt")
 
@@ -113,6 +116,10 @@ class JsonlASRDataset(torch.utils.data.Dataset):
             "input_features": feats.input_features[0],
             "labels": torch.tensor(ids, dtype=torch.long),
             "utt_id": ex.get("utt_id", Path(apath).stem),
+            "audio_path": apath,
+            "group": ex.get("group", "XX"),
+            "duration_sec": duration_sec,
+            "has_ast": ("*" in txt_raw),
         }
 
 # ---------- Collator ----------
@@ -125,6 +132,10 @@ class DataCollator:
             "input_features": torch.stack(feats),
             "labels": torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100),
             "utt_id": [f["utt_id"] for f in features],
+            "audio_path": [f.get("audio_path", "") for f in features],
+            "group": [f.get("group", "XX") for f in features],
+            "duration_sec": [float(f.get("duration_sec", 0.0)) for f in features],
+            "has_ast": [bool(f.get("has_ast", False)) for f in features],
         }
 
 # ---------- CER ----------
@@ -172,6 +183,11 @@ def main():
                     help="When to run evaluation: per epoch or per steps")
     ap.add_argument("--eval_steps", type=int, default=500,
                     help="Run evaluation every N steps when --eval_strategy=steps")
+    # Logging / diagnostics
+    ap.add_argument("--grad_log_interval", type=int, default=100,
+                    help="Log grad_norm every N global steps")
+    ap.add_argument("--hardest_k", type=int, default=50,
+                    help="Top-K hardest samples to dump per evaluation")
     # Normalization switches
     ap.add_argument("--strip_asterisk", action="store_true", help="Whether to remove '*' from training text (default: keep)")
     ap.add_argument("--strip_punct", action="store_true", help="Whether to remove punctuation from training text (default: keep)")
@@ -295,7 +311,16 @@ def main():
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
             self.model.eval()
             preds, refs = [], []
+            utt_ids_all, audio_paths_all, groups_all, durs_all, has_ast_all = [], [], [], [], []
             total_loss, total_items = 0.0, 0
+            total_audio_sec = 0.0
+            t0 = time.time()
+            # reset peak memory to measure eval peak
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
             loader = torch.utils.data.DataLoader(
                 eval_dataset,
                 batch_size=self.args.per_device_eval_batch_size,
@@ -316,6 +341,15 @@ def main():
                     bs = labels.size(0)
                     total_loss += loss_val * bs
                     total_items += bs
+                    # side info aggregation
+                    utt_ids_all.extend(batch.get("utt_id", []))
+                    audio_paths_all.extend(batch.get("audio_path", []))
+                    grp_list = batch.get("group", ["XX"]) 
+                    groups_all.extend(grp_list)
+                    durs = [float(x) for x in batch.get("duration_sec", [0.0]*bs)]
+                    durs_all.extend(durs)
+                    total_audio_sec += float(sum(durs))
+                    has_ast_all.extend([bool(x) for x in batch.get("has_ast", [False]*bs)])
                     # Generation for CER
                     ids = self.model.generate(input_features=feats, **gen_kwargs)
                     hyp = processor.batch_decode(ids, skip_special_tokens=True)
@@ -330,10 +364,162 @@ def main():
                     preds.extend(hyp)
                     refs.extend(ref)
 
+            # Aggregate metrics
+            wall = max(1e-6, time.time() - t0)
             cer = cer_metric(preds, refs)
             eval_loss = (total_loss / max(1, total_items)) if total_items > 0 else 0.0
-            print(f"[EVAL] CER={cer:.2f}%  |  loss={eval_loss:.4f}")
-            return {f"{metric_key_prefix}_cer": cer, f"{metric_key_prefix}_loss": eval_loss}
+
+            # Per-sample CER and ratio
+            def _ed(a: str, b: str) -> int:
+                la, lb = len(a), len(b)
+                if la == 0: return lb
+                if lb == 0: return la
+                prev = list(range(lb + 1))
+                curr = [0]*(lb + 1)
+                for i in range(1, la + 1):
+                    curr[0] = i
+                    ca = a[i-1]
+                    for j in range(1, lb + 1):
+                        cb = b[j-1]
+                        cost = 0 if ca == cb else 1
+                        curr[j] = min(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
+                    prev, curr = curr, prev
+                return prev[lb]
+
+            per_cer = []  # percentage
+            len_ratios = []
+            hyp_lens, ref_lens = [] , []
+            for h, r in zip(preds, refs):
+                e = _ed(h, r)
+                rlen = len(r)
+                hlen = len(h)
+                ref_len_safe = max(1, rlen)
+                per_cer.append(100.0 * e / ref_len_safe)
+                len_ratios.append((hlen / ref_len_safe) if ref_len_safe > 0 else float('nan'))
+                hyp_lens.append(hlen)
+                ref_lens.append(rlen)
+
+            # Group CERs
+            group_cer = {}
+            for g in ["DF","DM","ZF","ZM","XX"]:
+                idx = [i for i, gg in enumerate(groups_all) if gg == g]
+                if idx:
+                    gp = [preds[i] for i in idx]
+                    gr = [refs[i] for i in idx]
+                    group_cer[g] = cer_metric(gp, gr)
+
+            # Length bucket CERs
+            buckets = [
+                ("[0-6.5s]", 0.0, 6.5),
+                ("[6.5-9.6]", 6.5, 9.6),
+                ("[9.6-12.4]", 9.6, 12.4),
+                ("[12.4-20]", 12.4, 20.0),
+            ]
+            bucket_cer = {}
+            for name, lo, hi in buckets:
+                idx = [i for i, d in enumerate(durs_all) if (d >= lo and d < hi)]
+                if idx:
+                    bp = [preds[i] for i in idx]
+                    br = [refs[i] for i in idx]
+                    bucket_cer[name] = cer_metric(bp, br)
+
+            # Asterisk sensitivity
+            idx_has = [i for i, f in enumerate(has_ast_all) if f]
+            idx_no = [i for i, f in enumerate(has_ast_all) if not f]
+            cer_has = cer_metric([preds[i] for i in idx_has], [refs[i] for i in idx_has]) if idx_has else float('nan')
+            cer_no = cer_metric([preds[i] for i in idx_no], [refs[i] for i in idx_no]) if idx_no else float('nan')
+
+            # Degeneration: repeated character trigram in hypothesis + average duplicate count
+            def trigram_dup_count(s: str) -> int:
+                counts = {}
+                for i in range(len(s) - 2):
+                    tri = s[i:i+3]
+                    counts[tri] = counts.get(tri, 0) + 1
+                return sum((c - 1) for c in counts.values() if c >= 2)
+            dup_counts = [trigram_dup_count(h) for h in preds]
+            repeat_rate = sum(1 for c in dup_counts if c > 0) / max(1, len(dup_counts))
+            dup_mean = (sum(dup_counts) / max(1, len(dup_counts)))
+
+            # Length ratio stats
+            lr_vals = [x for x in len_ratios if math.isfinite(x)]
+            if lr_vals:
+                lr_mean = float(sum(lr_vals) / len(lr_vals))
+                srt = sorted(lr_vals)
+                mid = len(srt) // 2
+                lr_median = float(srt[mid]) if (len(srt) % 2 == 1) else float(0.5 * (srt[mid-1] + srt[mid]))
+            else:
+                lr_mean = float('nan'); lr_median = float('nan')
+
+            # Throughput and memory
+            audio_hours = total_audio_sec / 3600.0
+            sps = (total_audio_sec / wall) if wall > 0 else float('nan')
+            max_mem_gb = float('nan')
+            if torch.cuda.is_available():
+                try:
+                    max_mem_gb = float(torch.cuda.max_memory_allocated() / (1024**3))
+                except Exception:
+                    pass
+
+            # Dump Top-K hardest samples
+            try:
+                # length bucket assignment for each sample
+                def bucket_name(d: float) -> str:
+                    if 0.0 <= d < 6.5: return "[0-6.5s]"
+                    if 6.5 <= d < 9.6: return "[6.5-9.6]"
+                    if 9.6 <= d < 12.4: return "[9.6-12.4]"
+                    if 12.4 <= d < 20.0: return "[12.4-20]"
+                    return ">=20"
+                per_items = list(zip(utt_ids_all, audio_paths_all, groups_all, durs_all, has_ast_all, refs, preds, per_cer))
+                per_items.sort(key=lambda x: (-x[7], -x[3]))
+                step = getattr(self.state, 'global_step', None)
+                epoch = getattr(self.state, 'epoch', None)
+                stamp = f"step{step}" if step is not None else (f"epoch{int(epoch)}" if epoch is not None else "eval")
+                out_tsv = Path(self.args.output_dir) / f"eval_topk_hard_{stamp}.tsv"
+                k = max(1, int(args.hardest_k))
+                with out_tsv.open('w', encoding='utf-8') as f:
+                    # Order: utt_id, ref, hyp, cer, audio_path, group, len_bucket, has_ast
+                    f.write("utt_id\tref\thyp\tcer\taudio_path\tgroup\tlen_bucket\thas_ast\n")
+                    for (uid, ap, grp, dur, ha, r, h, cer_i) in per_items[:k]:
+                        f.write(
+                            f"{uid}\t{r}\t{h}\t{cer_i:.2f}\t{ap}\t{grp}\t{bucket_name(float(dur))}\t{int(ha)}\n"
+                        )
+            except Exception:
+                pass
+
+            hyp_len_mean = float(sum(hyp_lens) / len(hyp_lens)) if hyp_lens else float('nan')
+            ref_len_mean = float(sum(ref_lens) / len(ref_lens)) if ref_lens else float('nan')
+
+            metrics = {
+                f"{metric_key_prefix}_cer": cer,
+                f"{metric_key_prefix}_loss": eval_loss,
+                "eval_seconds_per_second": sps,
+                "eval_audio_hours": audio_hours,
+                "eval_max_mem_gb": max_mem_gb,
+                "eval_repeat_rate_3gram": repeat_rate,
+                "eval_repeat_3gram_dup_count_mean": dup_mean,
+                "eval_len_ratio_mean": lr_mean,
+                "eval_len_ratio_median": lr_median,
+                "eval_cer_has_ast": cer_has,
+                "eval_cer_no_ast": cer_no,
+                "eval_hyp_len_mean": hyp_len_mean,
+                "eval_ref_len_mean": ref_len_mean,
+            }
+            for g, v in group_cer.items():
+                metrics[f"{metric_key_prefix}_cer_{g}"] = v
+            for name, v in bucket_cer.items():
+                metrics[f"{metric_key_prefix}_cer_len_{name}"] = v
+
+            # Filter out non-finite values to avoid logger/JSON errors
+            safe_metrics = {}
+            for k, v in metrics.items():
+                if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                    safe_metrics[k] = float(v)
+
+            # Log so TensorBoard/checkpointing see the metrics, and trigger callbacks (EarlyStopping, best model)
+            self.log(safe_metrics)
+            self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, safe_metrics)
+            print(f"[EVAL] CER={cer:.2f}%  |  loss={eval_loss:.4f}  |  sps={sps:.2f}  |  hrs={audio_hours:.3f}")
+            return safe_metrics
 
     trainer = CERTrainer(
         model=model,
@@ -345,7 +531,51 @@ def main():
         compute_metrics=None,
     )
 
-    trainer.add_callback(EarlyStoppingCallback(early_stopping_patience=2))
+    class ExtraStatsCallback(EarlyStoppingCallback):
+        def __init__(self, early_stopping_patience=2, grad_log_interval=100):
+            super().__init__(early_stopping_patience=early_stopping_patience)
+            self.grad_log_interval = grad_log_interval
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            trainer = getattr(self, 'trainer', None)
+            model = trainer.model if trainer is not None else None
+            if model is not None and trainer is not None:
+                trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                trainer.log({"train/trainable_params": float(trainable)})
+
+        def on_step_end(self, args, state, control, **kwargs):
+            trainer = getattr(self, 'trainer', None)
+            if trainer is None:
+                return
+            step = state.global_step or 0
+            if step > 0 and (step % max(1, self.grad_log_interval) == 0):
+                try:
+                    total_sq = 0.0
+                    for p in trainer.model.parameters():
+                        if p.grad is not None:
+                            val = p.grad.data.norm(2).item()
+                            if math.isfinite(val):
+                                total_sq += val * val
+                    trainer.log({"train/grad_norm": math.sqrt(total_sq)})
+                except Exception:
+                    pass
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            """Mirror HF 'loss' to 'train/loss' to keep tag naming consistent.
+            Avoid recursion by only logging when 'loss' exists and we are not already logging the mirrored key.
+            """
+            trainer = getattr(self, 'trainer', None)
+            if trainer is None or not isinstance(logs, dict):
+                return
+            if 'loss' in logs and 'train/loss' not in logs:
+                try:
+                    val = float(logs['loss'])
+                    if math.isfinite(val):
+                        trainer.log({"train/loss": val})
+                except Exception:
+                    pass
+
+    trainer.add_callback(ExtraStatsCallback(early_stopping_patience=2, grad_log_interval=int(args.grad_log_interval)))
     trainer.train()
     model.save_pretrained(args.out_dir)      # Save LoRA adapter
     processor.save_pretrained(args.out_dir)
