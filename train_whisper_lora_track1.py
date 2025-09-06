@@ -26,6 +26,10 @@ from transformers import (
     TrainingArguments, Trainer, set_seed
 )
 from peft import LoraConfig, get_peft_model
+try:
+    from peft import TaskType
+except ImportError:
+    TaskType = None  # noqa: F811
 
 # ---- More stable memory management / 4090 friendly ----
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -203,9 +207,18 @@ def main():
     # Keep model defaults (incl. suppress_tokens); don't forcibly clear them
     model.config.forced_decoder_ids = None
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
+    # 更穩定的梯度檢查點（避免 reentrant 帶來的問題）
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except Exception:
+        model.gradient_checkpointing_enable()
     try:
         model.enable_input_require_grads()
+    except Exception:
+        pass
+    # 嘗試開啟 Flash-Attention 2（若不可用就忽略）
+    try:
+        model.set_attn_implementation("flash_attention_2")
     except Exception:
         pass
 
@@ -213,7 +226,8 @@ def main():
     lcfg = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
-        bias="none", task_type="SPEECH_SEQ_2_SEQ",
+        bias="none", 
+        task_type=(TaskType.SEQ_2_SEQ_LM if TaskType is not None else "SEQ_2_SEQ_LM"),
     )
     model = get_peft_model(model, lcfg)
 
@@ -238,6 +252,10 @@ def main():
         output_scores=False,
     )
 
+    # 讓 save 與 eval 的節奏一致，避免 best model 在 step 發生但只在 epoch 儲存
+    _save_strategy = args.eval_strategy
+    _save_steps = (args.eval_steps if args.eval_strategy == "steps" else None)
+    
     # TrainingArguments
     args_hf = TrainingArguments(
         output_dir=str(args.out_dir),
@@ -254,7 +272,9 @@ def main():
         logging_steps=25,
         evaluation_strategy=args.eval_strategy,
         eval_steps=(args.eval_steps if args.eval_strategy == "steps" else None),
-        save_strategy="epoch",
+        save_strategy=_save_strategy,
+        save_steps=_save_steps,
+        eval_accumulation_steps=32,
         load_best_model_at_end=True,
         metric_for_best_model="eval_cer",
         greater_is_better=False,
