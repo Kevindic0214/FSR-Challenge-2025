@@ -47,7 +47,6 @@ FSR-Challenge-2025/
 │   └── quick_ser_check.py               # Quick SER validation
 ├── �️ Utilities
 │   ├── make_keyonly_track2.py           # Generate key-only files for track 2
-│   └── plot_loss.py                     # Training loss visualization
 ├── �🚀 Pipeline Management
 │   ├── run_track1_pipeline.py           # Complete track 1 pipeline
 │   └── run_track1_pipeline.sh           # Complete track 1 pipeline (bash)
@@ -82,11 +81,14 @@ FSR-Challenge-2025/
 git clone <your-repo-url>
 cd FSR-Challenge-2025
 
-# Install dependencies
-pip install -r requirements-minimal.txt
+# Install core dependencies
+pip install torch torchaudio transformers peft tqdm soundfile librosa
 
-# Or install full dependencies (with optional features)
-pip install -r requirements.txt
+# Optional (recommended):
+# - opencc-python-reimplemented  (Simplified/Traditional conversion for diagnostics)
+# - tensorboard                  (training visualization)
+# - accelerate                   (multi-GPU training)
+pip install opencc-python-reimplemented tensorboard accelerate
 ```
 
 ### 2. Prepare Data
@@ -191,10 +193,7 @@ python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
 python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
 
 # Quick inference for a single file
-python quick_infer_one.py --audio_file path/to/audio.wav --model_dir runs/track1/model
-
-# Plot training loss
-python plot_loss.py --log_dir runs/track1/lora_v2_r16_e3
+python quick_infer_one.py runs/track1/whisper_v2_lora path/to/audio.wav
 ```
 
 ## 📋 Detailed Component Description
@@ -327,7 +326,6 @@ warmup_steps = 500
 ### 5. Utilities
 
 **`make_keyonly_track2.py`** - Generate key-only files for Track 2 submissions
-**`plot_loss.py`** - Visualize training loss curves from tensorboard logs
 **`quick_infer_one.py`** - Quick inference for single audio files
 **`quick_ser_check.py`** - Quick SER validation for Track 2
 
@@ -348,13 +346,13 @@ Default paths and settings can be customized:
 python train_whisper_lora_track1.py \
     --base_model "openai/whisper-large-v2" \
     --out_dir "runs/track1/lora_v2_r16_e3" \
-    --lora_r 16 --lora_alpha 32
+    --lora_r 16 --lora_alpha 32 --lora_dropout 0.05
 
 # Track 2 Training  
 python train_whisper_lora_track2.py \
     --base_model "openai/whisper-large-v2" \
     --out_dir "runs/track2/lora_v2_r16_e3" \
-    --lora_r 16 --lora_alpha 32
+    --lora_r 16 --lora_alpha 32 --lora_dropout 0.05
 ```
 
 ### Pipeline Configuration
@@ -446,8 +444,6 @@ python <script>.py --verbose
 tensorboard --logdir runs/track1/lora_v2_r16_e3
 tensorboard --logdir runs/track2/lora_v2_r16_e3
 
-# Plot training loss
-python plot_loss.py --log_dir runs/track1/lora_v2_r16_e3
 ```
 
 ## 🔍 Error Analysis & Diagnostics
@@ -543,6 +539,8 @@ accelerate launch train_whisper_lora_track2.py <args>
 - **Transformers**: 4.30+
 - **PEFT**: 0.4+ (for LoRA)
 - **torchaudio**: 2.0+
+- **tqdm**: for progress bars (inference)
+- **librosa** and **soundfile**: for quick single-file inference
 
 ### Optional Dependencies  
 - **opencc-python-reimplemented**: Traditional/Simplified Chinese conversion

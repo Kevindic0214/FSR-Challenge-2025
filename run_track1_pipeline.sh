@@ -4,9 +4,9 @@
 # Usage: ./run_track1_pipeline.sh [stage_start] [stage_end]
 # Stages: 1=prepare, 2=train, 3=infer, 4=eval
 
-set -e  # Exit on error
+set -euo pipefail  # Safer bash: exit on error/undef, and fail on pipeline errors
 
-# Configuration
+# Configuration (adjust as needed)
 ROOT_DIR="HAT-Vol2"
 MANIFESTS_DIR="${ROOT_DIR}/manifests_track1"
 MODEL_DIR="runs/track1/whisper_v2_lora"
@@ -70,7 +70,8 @@ if [ $STAGE_START -le 2 ] && [ $STAGE_END -ge 2 ]; then
         --batch_size 2 \
         --grad_accum 16 \
         --lora_r 16 \
-        --lora_alpha 32
+        --lora_alpha 32 \
+        --lora_dropout 0.05
     
     echo "Training completed. Model saved to $MODEL_DIR/"
     echo ""
@@ -99,7 +100,9 @@ if [ $STAGE_START -le 3 ] && [ $STAGE_END -ge 3 ]; then
         --lora_dir "$MODEL_DIR" \
         --outfile "$PRED_FILE" \
         --beams 1 \
-        --temperature 0.0
+        --temperature 0.0 \
+        --length_penalty 1.0 \
+        --max_new_tokens 256
     
     echo "Inference completed. Results saved to $PRED_FILE"
     echo ""
