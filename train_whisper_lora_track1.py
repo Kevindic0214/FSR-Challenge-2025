@@ -239,11 +239,13 @@ def main():
         pass
 
     # LoRA (always set up for training)
+    # Force speech-specific task type to avoid PEFT passing text-only kwargs (e.g., input_ids) to Whisper.
+    # Using string keeps compatibility across PEFT versions.
     lcfg = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
         target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
-        bias="none", 
-        task_type=(TaskType.SEQ_2_SEQ_LM if TaskType is not None else "SEQ_2_SEQ_LM"),
+        bias="none",
+        task_type="SPEECH_SEQ_2_SEQ",
     )
     model = get_peft_model(model, lcfg)
 
@@ -303,7 +305,11 @@ def main():
 
     class CERTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
-            outputs = model(input_features=inputs["input_features"], labels=inputs["labels"])
+            feats = inputs["input_features"].to(model.device, non_blocking=True)
+            model_dtype = next(model.parameters()).dtype
+            feats = feats.to(dtype=model_dtype)
+            labels = inputs["labels"].to(model.device, non_blocking=True)
+            outputs = model(input_features=feats, labels=labels)
             loss = outputs.loss
             return (loss, outputs) if return_outputs else loss
 
