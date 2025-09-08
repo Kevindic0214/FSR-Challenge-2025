@@ -99,7 +99,7 @@ if [ $STAGE_START -le 3 ] && [ $STAGE_END -ge 3 ]; then
         --model "openai/whisper-large-v2" \
         --lora_dir "$MODEL_DIR" \
         --outfile "$PRED_FILE" \
-        --beams 1 \
+        --beams 5 \
         --temperature 0.0 \
         --length_penalty 1.0 \
         --max_new_tokens 256
