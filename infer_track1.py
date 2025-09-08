@@ -155,7 +155,44 @@ def main():
     ap.add_argument("--log_jsonl", type=str, default=None, help="Optional per-utt log jsonl")
     ap.add_argument("--key_csv_filter", type=str, default=None,
                     help="Optional key CSV/TXT to filter output rows by filename")
+    ap.add_argument("--batch_size_decode", type=int, default=4,
+                    help="Batch size for decoding/generation (increase to improve GPU utilization)")
     args = ap.parse_args()
+
+    # Safety check: ensure LoRA adapter matches the chosen base model
+    def _lora_base_name(lora_dir: str) -> Optional[str]:
+        try:
+            cfg_path = Path(lora_dir) / "adapter_config.json"
+            if not cfg_path.exists():
+                return None
+            with cfg_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            base = (
+                data.get("base_model_name_or_path")
+                or data.get("base_model_name")
+                or data.get("base_model")
+            )
+            if isinstance(base, str):
+                base = base.strip()
+            return base or None
+        except Exception:
+            return None
+
+    if args.lora_dir:
+        lora_base = _lora_base_name(args.lora_dir)
+        if lora_base:
+            a = lora_base.lower()
+            b = args.model.lower()
+            if (a not in b) and (b not in a):
+                raise SystemExit(
+                    f"[ERROR] LoRA adapter base_model_name_or_path='{lora_base}' does not match --model='{args.model}'."
+                    " Please use a matching base model, or change --model accordingly."
+                )
+        else:
+            print(
+                f"[WARN] Cannot determine adapter base model in {args.lora_dir} (missing/invalid adapter_config.json).",
+                "Proceeding without strict check...",
+            )
 
     # device & dtype
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -180,6 +217,7 @@ def main():
     processor = WhisperProcessor.from_pretrained(proc_from)
 
     model.to(device).eval()
+    model_dtype = next(model.parameters()).dtype
 
     # Force Chinese transcription prompt (avoid language drift)
     forced_ids = processor.get_decoder_prompt_ids(language="zh", task="transcribe")
@@ -215,21 +253,34 @@ def main():
     # ensure output dir exists
     Path(args.outfile).parent.mkdir(parents=True, exist_ok=True)
 
-    # decode
+    # decode (batched)
     log_f = open(args.log_jsonl, "w", encoding="utf-8") if args.log_jsonl else None
     n_ok = 0
+    bs = max(1, int(args.batch_size_decode))
     with open(args.outfile, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["錄音檔檔名", "辨認結果"])
-        for utt_id, apath in tqdm(pair_list, ncols=100, desc="Decoding"):
-            wav = load_audio(apath, target_sr=SR)
-            model_dtype = next(model.parameters()).dtype
-            feats = processor.feature_extractor(
-                wav.numpy(), sampling_rate=SR, return_tensors="pt"
-            ).input_features.to(device=device, dtype=model_dtype)
+        rng = range(0, len(pair_list), bs)
+        for i in tqdm(rng, ncols=100, desc="Decoding"):
+            chunk = pair_list[i:i+bs]
+            utt_ids = [uid for uid, _ in chunk]
+            paths = [ap for _, ap in chunk]
+            wavs = [load_audio(p, target_sr=SR) for p in paths]
+            feats_batch = processor.feature_extractor(
+                [w.numpy() for w in wavs], sampling_rate=SR, return_tensors="pt"
+            )
+            feats = feats_batch.input_features.to(device=device, dtype=model_dtype)
+            attn = None
+            try:
+                attn = feats_batch.data.get("attention_mask", None)
+            except Exception:
+                attn = None
+            if attn is not None:
+                attn = attn.to(device=device)
             with torch.inference_mode():
                 pred_ids = model.generate(
                     input_features=feats,
+                    attention_mask=attn,
                     num_beams=gc.num_beams,
                     do_sample=gc.do_sample,
                     temperature=gc.temperature,
@@ -238,22 +289,23 @@ def main():
                     no_repeat_ngram_size=3,
                     forced_decoder_ids=forced_ids,
                 )
-            raw_text = processor.batch_decode(pred_ids, skip_special_tokens=True)[0]
-            text = normalize_hanzi(
-                raw_text,
-                strip_spaces=True,
-                keep_asterisk=(not args.strip_asterisk),
-                strip_punct=args.strip_punct,
-            )
-            w.writerow([utt_id, text])
-            n_ok += 1
-            if log_f:
-                log_f.write(json.dumps({
-                    "utt_id": utt_id,
-                    "path": apath,
-                    "raw_text": raw_text,
-                    "text": text,
-                }, ensure_ascii=False) + "\n")
+            raw_texts = processor.batch_decode(pred_ids, skip_special_tokens=True)
+            for uid, apath, raw_text in zip(utt_ids, paths, raw_texts):
+                text = normalize_hanzi(
+                    raw_text,
+                    strip_spaces=True,
+                    keep_asterisk=(not args.strip_asterisk),
+                    strip_punct=args.strip_punct,
+                )
+                w.writerow([uid, text])
+                n_ok += 1
+                if log_f:
+                    log_f.write(json.dumps({
+                        "utt_id": uid,
+                        "path": apath,
+                        "raw_text": raw_text,
+                        "text": text,
+                    }, ensure_ascii=False) + "\n")
     if log_f:
         log_f.close()
 
