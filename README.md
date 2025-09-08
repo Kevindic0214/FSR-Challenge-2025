@@ -384,6 +384,18 @@ Create custom config for `run_track1_pipeline.py`:
 - **Hardware**: RTX 4090 24GB
 - **Evaluation**: FSR-2025-Hakka-evaluation warm-up set
 
+### Warm-up Results (Track 1)
+
+- **Dataset**: Official warm-up set (4299 utterances)
+- **Metric**: CER = 10.94%, Exact‑Match = 58.06%
+- **Evaluation**: `python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key --hyp predictions_track1.csv`
+- **Key-only artifacts**: aligned to official list (no extras)
+  - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/pred_keyonly.csv`
+  - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/aligned_keyonly.csv`
+  - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/errors_keyonly.jsonl`
+  - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/eval_keyonly.txt`
+- **Notes**: Coverage matched 4299/4299; extra 0 (pred‑only). CER/EM identical to full predictions.
+
 ### Experiment Versions
 - **experiments_v2/**: Version 2 results with beam search comparisons
 - **experiments_v3t/**: Version 3t results with temperature tuning
