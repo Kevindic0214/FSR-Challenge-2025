@@ -49,7 +49,9 @@ FSR-Challenge-2025/
 │   ├── make_keyonly_track2.py           # Generate key-only files for track 2
 ├── �🚀 Pipeline Management
 │   ├── run_track1_pipeline.py           # Complete track 1 pipeline
-│   └── run_track1_pipeline.sh           # Complete track 1 pipeline (bash)
+│   ├── run_track1_pipeline.sh           # Complete track 1 pipeline (bash)
+│   ├── run_track2_pipeline.py           # Complete track 2 pipeline
+│   └── run_track2_pipeline.sh           # Complete track 2 pipeline (bash)
 ├── 📁 Data Directories
 │   ├── HAT-Vol2/                        # Training dataset (~60H)
 │   │   ├── manifests_track1/            # Track 1 train/dev manifests
@@ -162,17 +164,37 @@ python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
 
 **Track 2 (Pinyin Recognition)**
 
-*Manual Step-by-Step (Track 2)*
+*Option A: Using Python Pipeline (Recommended)*
+```bash
+# Run complete track 2 pipeline (all stages)
+python run_track2_pipeline.py
+
+# Run specific stages only (e.g., data prep + train)
+python run_track2_pipeline.py --stage_start 1 --stage_end 2
+
+# Dry run to preview commands
+python run_track2_pipeline.py --dry_run
+```
+
+*Option B: Using Bash Pipeline*
+```bash
+chmod +x run_track2_pipeline.sh
+./run_track2_pipeline.sh           # Run all stages
+./run_track2_pipeline.sh 1 3       # Run stages 1-3 only
+```
+
+*Option C: Manual Step-by-Step (Track 2)*
 ```bash
 # Stage 1: Data Preparation
-python prepare_hakka_track2.py --root HAT-Vol2 --drop_mispronounce
+python prepare_hakka_track2.py --data_root HAT-Vol2 --out_dir HAT-Vol2/manifests_track2 --exclude_mispronounced
 
 # Stage 2: Training  
-python train_whisper_lora_track2.py --train_jsonl HAT-Vol2/manifests_track2/train.jsonl
+python train_whisper_lora_track2.py
 
-# Stage 3: Inference
+# Stage 3: Inference (可切換 base 模型)
 python infer_hakka_pinyin_warmup.py --eval_root FSR-2025-Hakka-evaluation \
-    --model openai/whisper-large-v2 --lora_dir runs/track2/lora_v2_r16_e3 \
+    --lora_dir exp_track2_whisper_large_lora \
+    --model openai/whisper-large-v2 \
     --outfile predictions_pinyin.csv
 
 # Alternative inference method
@@ -181,7 +203,7 @@ python infer_whisper_track2.py --eval_root FSR-2025-Hakka-evaluation \
 
 # Stage 4: Evaluation
 python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
-    --hyp predictions_pinyin.csv
+    --pred_csv predictions_pinyin.csv
 
 # Quick SER check
 python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
@@ -218,6 +240,27 @@ python quick_infer_one.py runs/track1/whisper_v2_lora path/to/audio.wav
 --drop_mispronounce            # Filter mispronounced samples
 --strip_asterisk               # Remove co-articulation markers
 --relative_audio_path          # Use relative paths (recommended)
+```
+
+Track 2 specific (aligned with Track 1 features):
+```bash
+# Required
+--data_root HAT-Vol2                        # CSV + audio root
+--out_dir HAT-Vol2/manifests_track2        # Output directory for JSONL
+
+# Splits and filtering
+--dev_speakers 12                           # Minimum dev speakers
+--dev_ratio 0.10                            # Ratio of dev speakers
+--exclude_mispronounced                     # Drop rows with 備註 含「正確讀音」
+
+# Starred syllables handling
+--drop_star_syllables | --keep_star_syllables
+
+# Paths and diagnostics
+--audio_root HAT-Vol2                       # If audio lives outside data_root
+--relative_audio_path                       # Store audio paths relative to --audio_root
+--stats_out HAT-Vol2/manifests_track2/stats.json
+--dev_list_out HAT-Vol2/manifests_track2/dev_speakers.txt
 ```
 
 **Output Format:**
@@ -261,6 +304,18 @@ warmup_steps = 500
 - CER-based evaluation during training (Track 1) / SER-based evaluation (Track 2)
 - Compatible with 24GB GPU (RTX 4090)
 - Track-specific text processing and evaluation metrics
+
+Track 2 training overrides (CLI):
+```bash
+python train_whisper_lora_track2.py \
+  --train_jsonl HAT-Vol2/manifests_track2/train.jsonl \
+  --dev_jsonl   HAT-Vol2/manifests_track2/dev.jsonl \
+  --audio_root  HAT-Vol2 \
+  --out_dir     exp_track2_whisper_large_lora \
+  --base_model  openai/whisper-large-v2 \
+  --lora_r 8 --lora_alpha 16 --lora_dropout 0.1 \
+  --epochs 3 --lr 5e-4 --batch_size 2 --grad_accum 16
+```
 
 ### 3. Inference
 
