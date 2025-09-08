@@ -109,22 +109,25 @@ def load_key_set(key_path: str) -> Set[str]:
                 keep.add(line)
     else:
         with p.open("r", encoding="utf-8") as f:
-            rdr = csv.reader(f)
-            rows = list(rdr)
+            rows = list(csv.reader(f))
         if not rows:
             return keep
         header = rows[0]
-        start = 1
-        col = 0
-        if "錄音檔檔名" in header:
-            col = header.index("錄音檔檔名")
-        else:
-            # assume first row is header if any cell is non-empty; otherwise start from 0
-            start = 1 if any(h for h in header) else 0
+        # assume first row is header if any cell is non-empty; otherwise start from 0
+        start = 1 if any(h for h in header) else 0
+        def idx(names, default):
+            for n in names:
+                if n in header:
+                    return header.index(n)
+            return default
+        col = idx(["錄音檔檔名","檔名","filename","file","id"], 0)
         for r in rows[start:]:
             if not r:
                 continue
-            keep.add(r[col].strip())
+            val = (r[col] if col < len(r) else "").strip()
+            if not val:
+                continue
+            keep.add(Path(val).name)
     return keep
 
 # -------- Main --------
@@ -140,7 +143,7 @@ def main():
     ap.add_argument("--root", type=str, default=None,
                     help="If eval_root is a JSONL and audio paths are relative, join with this root")
     # decoding
-    ap.add_argument("--beams", type=int, default=1)
+    ap.add_argument("--beams", type=int, default=5)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--length_penalty", type=float, default=1.0)
     ap.add_argument("--max_new_tokens", type=int, default=256)
@@ -198,16 +201,16 @@ def main():
         pair_list = [(Path(p).name, p) for p in wavs]
         print(f"[INFO] Found {len(pair_list)} wavs under: {eval_path}")
 
-    if args.limit and args.limit > 0:
-        pair_list = pair_list[:args.limit]
-        print(f"[INFO] Limiting to first {len(pair_list)} items")
-
-    # optional key filter (for official warm-up)
+    # optional key filter (for official warm-up) – apply before limit
     if args.key_csv_filter:
         keep = load_key_set(args.key_csv_filter)
         before = len(pair_list)
         pair_list = [kv for kv in pair_list if kv[0] in keep]
         print(f"[INFO] Key filter: kept {len(pair_list)}/{before} rows by {args.key_csv_filter}")
+
+    if args.limit and args.limit > 0:
+        pair_list = pair_list[:args.limit]
+        print(f"[INFO] Limiting to first {len(pair_list)} items")
 
     # ensure output dir exists
     Path(args.outfile).parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +227,7 @@ def main():
             feats = processor.feature_extractor(
                 wav.numpy(), sampling_rate=SR, return_tensors="pt"
             ).input_features.to(device=device, dtype=model_dtype)
-            with torch.no_grad():
+            with torch.inference_mode():
                 pred_ids = model.generate(
                     input_features=feats,
                     num_beams=gc.num_beams,
@@ -232,6 +235,7 @@ def main():
                     temperature=gc.temperature,
                     length_penalty=gc.length_penalty,
                     max_new_tokens=gc.max_new_tokens,
+                    no_repeat_ngram_size=3,
                     forced_decoder_ids=forced_ids,
                 )
             raw_text = processor.batch_decode(pred_ids, skip_special_tokens=True)[0]
