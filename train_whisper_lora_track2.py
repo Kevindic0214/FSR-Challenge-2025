@@ -17,6 +17,7 @@ from transformers import (
     WhisperForConditionalGeneration, WhisperProcessor, WhisperTokenizer,
     TrainingArguments, Trainer, set_seed
 )
+from transformers.trainer_callback import EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model
 
 # ---- 建議：減少碎片化（可選，但有助穩定）----
