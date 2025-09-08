@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 import sys
 import json
-from typing import List
+from typing import List, Optional
 
 import torch
 import soundfile as sf
@@ -17,7 +17,6 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 from peft import PeftModel
 
 SR = 16000
-BASE_MODEL = "openai/whisper-large-v2"
 
 def load_wav(path: Path):
     wav, sr = sf.read(str(path))
@@ -36,6 +35,23 @@ def norm_pinyin(text: str) -> str:
 def find_all_wavs(root: Path) -> List[Path]:
     return sorted(root.rglob("*.wav"))
 
+def _lora_base_name(lora_dir: Path) -> Optional[str]:
+    try:
+        cfg_path = lora_dir / "adapter_config.json"
+        if not cfg_path.exists():
+            return None
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        base = (
+            data.get("base_model_name_or_path")
+            or data.get("base_model_name")
+            or data.get("base_model")
+        )
+        if isinstance(base, str):
+            base = base.strip()
+        return base or None
+    except Exception:
+        return None
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--eval_root", type=Path, default=Path("FSR-2025-Hakka-evaluation"),
@@ -44,6 +60,8 @@ def main():
                    help="你訓練好的 LoRA 輸出資料夾")
     p.add_argument("--outfile", type=Path, default=Path("Level-Up_拼音.csv"),
                    help="輸出 CSV 檔名（可改成 '單位_隊名_拼音.csv'）")
+    p.add_argument("--model", type=str, default="openai/whisper-large-v2",
+                   help="Base Whisper model to attach LoRA (e.g., openai/whisper-large-v2 or -v3-turbo)")
     p.add_argument("--beams", type=int, default=1, help="beam size（1=greedy，較快）")
     p.add_argument("--batch", type=int, default=1, help="一次處理幾個檔案（建議 1）")
     args = p.parse_args()
@@ -59,9 +77,18 @@ def main():
         sys.exit(1)
     print(f"[INFO] Found {len(wavs)} wav files.")
 
+    # 檢查 LoRA 與 base model 是否匹配
+    lora_base = _lora_base_name(args.lora_dir)
+    if lora_base:
+        a = lora_base.lower(); b = args.model.lower()
+        if (a not in b) and (b not in a):
+            print(f"[ERROR] LoRA adapter was trained on '{lora_base}', but --model is '{args.model}'.", file=sys.stderr)
+            print("Please pass a matching --model to avoid mismatch.", file=sys.stderr)
+            sys.exit(1)
+
     # 載入 Processor + Base + LoRA
-    processor = WhisperProcessor.from_pretrained(BASE_MODEL)
-    base = WhisperForConditionalGeneration.from_pretrained(BASE_MODEL)
+    processor = WhisperProcessor.from_pretrained(args.model)
+    base = WhisperForConditionalGeneration.from_pretrained(args.model)
     # 關閉 Whisper 預設 forced/suppress，並指定做「轉寫」
     base.config.forced_decoder_ids = None
     base.config.suppress_tokens = []
