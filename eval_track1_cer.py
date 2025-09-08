@@ -108,6 +108,14 @@ def first_diff_index(a: str, b: str) -> int:
     return n if len(a) != len(b) else -1
 
 # ---------- Loaders ----------
+def _has_header(header: List[str], expected_any: List[str]) -> bool:
+    """Return True if header row contains any expected column names."""
+    hdr_set = set(h.strip() for h in header if isinstance(h, str))
+    for name in expected_any:
+        if name in hdr_set:
+            return True
+    return False
+
 def load_hyp_csv(path: Path) -> Dict[str, str]:
     hyp: Dict[str, str] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as f:
@@ -116,7 +124,8 @@ def load_hyp_csv(path: Path) -> Dict[str, str]:
     if not rows:
         return hyp
     header = rows[0]
-    start = 1 if any(h for h in header) else 0
+    # Consider first row a header only if it contains any expected column name
+    start = 1 if _has_header(header, ["錄音檔檔名","檔名","filename","file","id","辨認結果","結果","hyp","prediction","text"]) else 0
     def idx(names, default):
         for n in names:
             if n in header:
@@ -161,7 +170,8 @@ def load_ref_from_key_csv(csv_path: Path) -> Dict[str, str]:
     if not rows:
         return ref
     header = rows[0]
-    start = 1 if any(h for h in header) else 0
+    # Consider first row a header only if it contains any expected column name
+    start = 1 if _has_header(header, ["錄音檔檔名","檔名","filename","file","id","正解","客語漢字","標註","text"]) else 0
     def idx(names, default):
         for n in names:
             if n in header:
@@ -297,6 +307,14 @@ def main():
     # Load hypothesis
     hyp_map = load_hyp_csv(Path(args.pred_csv))
     if not hyp_map: print("[ERROR] No predictions loaded.", file=sys.stderr); sys.exit(1)
+
+    # Coverage summary
+    n_ref = len(ref_map)
+    n_hyp = len(hyp_map)
+    matched = sum(1 for k in ref_map.keys() if k in hyp_map)
+    missing = n_ref - matched
+    extra = sum(1 for k in hyp_map.keys() if k not in ref_map)
+    print(f"[INFO] Coverage: matched {matched}/{n_ref} refs; missing={missing}; extra={extra} (pred-only)")
 
     # Character profile (raw hyp)
     profile_hyp(hyp_map, sample=min(50, len(hyp_map)))
