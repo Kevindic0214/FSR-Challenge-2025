@@ -215,11 +215,11 @@ def stage_3_inference(config: Dict[str, Any]) -> bool:
     
     cfg = config["inference"]
     cmd = [
-        "python", "infer_hakka_hanzi_warmup.py",
+        "python", "infer_track1.py",
         "--eval_root", config["eval_data_dir"],
+        "--outfile", config["pred_file"],
         "--model", config["training"]["base_model"],
         "--lora_dir", config["model_dir"],
-        "--outfile", config["pred_file"],
         "--beams", str(cfg["beams"]),
         "--temperature", str(cfg["temperature"]),
         "--length_penalty", str(cfg["length_penalty"]),

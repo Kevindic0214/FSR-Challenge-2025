@@ -94,11 +94,11 @@ if [ $STAGE_START -le 3 ] && [ $STAGE_END -ge 3 ]; then
         exit 1
     fi
     
-    python infer_hakka_hanzi_warmup.py \
+    python infer_track1.py \
         --eval_root "FSR-2025-Hakka-evaluation" \
+        --outfile "$PRED_FILE" \
         --model "openai/whisper-large-v2" \
         --lora_dir "$MODEL_DIR" \
-        --outfile "$PRED_FILE" \
         --beams 5 \
         --temperature 0.0 \
         --length_penalty 1.0 \
