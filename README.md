@@ -41,8 +41,7 @@ FSR-Challenge-2025/
 │   └── infer_track2.py                  # Batch inference for pinyin (Track 2)
 ├── 📈 Evaluation
 │   ├── eval_track1_cer.py               # CER evaluation with diagnostics
-│   ├── eval_track2_ser.py               # SER evaluation for pinyin
-│   └── quick_ser_check.py               # Quick SER validation
+│   └── eval_track2_ser.py               # SER evaluation for pinyin
 ├── �️ Utilities
 │   ├── make_keyonly_track2.py           # Generate key-only files for track 2
 ├── �🚀 Pipeline Management
@@ -200,8 +199,7 @@ python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
 python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
     --pred_csv predictions_pinyin.csv
 
-# Quick SER check
-python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
+##
 ```
 
 **Utility Scripts**
@@ -209,8 +207,7 @@ python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
 # Generate key-only files for track 2
 python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
 
-# (Optional) Quick SER check on any two CSVs
-python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
+
 ```
 
 ## 📋 Detailed Component Description
@@ -342,8 +339,7 @@ python train_whisper_lora_track2.py \
 ### 4. Evaluation
 
 **Track 1: `eval_track1_cer.py`** - Character Error Rate Evaluation
-**Track 2: `eval_track2_ser.py`** - Syllable Error Rate Evaluation  
-**Utility: `quick_ser_check.py`** - Quick SER Validation
+**Track 2: `eval_track2_ser.py`** - Syllable Error Rate Evaluation
 
 **Evaluation Modes:**
 - **Manifest mode**: Compare against JSONL reference
@@ -374,7 +370,6 @@ python train_whisper_lora_track2.py \
 ### 5. Utilities
 
 **`make_keyonly_track2.py`** - Generate key-only files for Track 2 submissions
-**`quick_ser_check.py`** - Quick SER validation for Track 2
 
 ## 🔧 Configuration & Customization
 
@@ -485,10 +480,12 @@ python prepare_hakka_track2.py --relative_audio_path
 
 **4. Track 2 SER Evaluation Issues**
 ```bash
-# Use quick SER check for debugging
-python quick_ser_check.py --hyp predictions.csv --ref reference.csv
+# Evaluate SER against official key directory
+python eval_track2_ser.py \
+  --key_dir FSR-2025-Hakka-evaluation-key \
+  --pred_csv predictions_pinyin.csv
 
-# Generate key-only files if needed
+# Generate key-only files if needed (for submission preparation)
 python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
 ```
 
