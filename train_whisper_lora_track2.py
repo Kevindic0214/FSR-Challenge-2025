@@ -4,6 +4,8 @@
 import os
 import json
 import re
+import time
+import math
 import argparse
 from pathlib import Path
 from dataclasses import dataclass
@@ -61,10 +63,11 @@ class JsonlASRDataset(torch.utils.data.Dataset):
         inputs = self.processor.feature_extractor(
             wav, sampling_rate=SR, return_tensors="pt"
         )
-        # Track2: 直接用空白分隔的 a-z0-9 拼音序列
-        labels = self.processor.tokenizer(
-            ex["text"], add_special_tokens=True
-        ).input_ids
+        # Track2: 與評估一致的標註正規化（僅保留 a-z0-9 與單一空白）
+        raw_text = str(ex["text"]).lower()
+        norm_text = re.sub(r'[^a-z0-9\s]', ' ', raw_text)
+        norm_text = ' '.join(norm_text.split())
+        labels = self.processor.tokenizer(norm_text, add_special_tokens=True).input_ids
 
         return {
             "input_features": inputs.input_features[0],
@@ -74,6 +77,7 @@ class JsonlASRDataset(torch.utils.data.Dataset):
             "audio_path": str(apath),
             "group": ex.get("group", "XX"),
             "duration_sec": duration_sec,
+            "has_ast": ("*" in str(ex.get("text", ""))),
         }
 
 # ---------- collator ----------
@@ -90,6 +94,7 @@ class DataCollator:
             "audio_path": [f.get("audio_path", "") for f in features],
             "group": [f.get("group", "XX") for f in features],
             "duration_sec": [float(f.get("duration_sec", 0.0)) for f in features],
+            "has_ast": [bool(f.get("has_ast", False)) for f in features],
         }
 
 # ---------- SER ----------
@@ -121,17 +126,21 @@ def main():
     ap.add_argument("--out_dir",     type=Path, default=DEF_OUT_DIR)
     ap.add_argument("--base_model",  type=str, default=DEF_MODEL_NAME)
     # LoRA
-    ap.add_argument("--lora_r", type=int, default=8)
-    ap.add_argument("--lora_alpha", type=int, default=16)
-    ap.add_argument("--lora_dropout", type=float, default=0.1)
+    ap.add_argument("--lora_r", type=int, default=16)
+    ap.add_argument("--lora_alpha", type=int, default=32)
+    ap.add_argument("--lora_dropout", type=float, default=0.05)
     # Training hyperparams
     ap.add_argument("--epochs", type=int, default=3)
-    ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--eval_batch_size", type=int, default=4)
     ap.add_argument("--grad_accum", type=int, default=16)
-    ap.add_argument("--report_to", type=str, default="none", choices=["none","tensorboard"])
+    ap.add_argument("--eval_strategy", choices=["epoch","steps"], default="epoch",
+                    help="When to run evaluation: per epoch or per steps")
+    ap.add_argument("--eval_steps", type=int, default=500,
+                    help="Run evaluation every N steps when --eval_strategy=steps")
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--hardest_k", type=int, default=50, help="Top-K hardest samples to dump per evaluation")
     # Diagnostics
     ap.add_argument("--grad_log_interval", type=int, default=100, help="log grad_norm every N steps")
     args = ap.parse_args()
@@ -151,6 +160,7 @@ def main():
     except Exception:
         bf16_ok = False
     use_bf16 = bf16_ok
+    print(f"[INFO] Device={device}, bf16={use_bf16}")
 
     # 模型 & 記憶體優化
     model = WhisperForConditionalGeneration.from_pretrained(
@@ -158,8 +168,8 @@ def main():
         torch_dtype=(torch.bfloat16 if use_bf16 else None),
         low_cpu_mem_usage=True,
     )
+    # 與 Track1 對齊：不強制清空 suppress_tokens，僅在訓練時停用 cache
     model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
     model.config.use_cache = False  # LoRA 訓練時避免 cache
     # 更穩定的梯度檢查點
     try:
@@ -183,30 +193,30 @@ def main():
     )
     model = get_peft_model(model, lcfg)
 
-    # 再保險：同步 generation_config
-    try:
-        model.config.forced_decoder_ids = None
-        model.config.suppress_tokens = []
-        if hasattr(model, "generation_config") and model.generation_config is not None:
-            model.generation_config.suppress_tokens = []
-    except Exception:
-        pass
+    # 與 Track1 一致：保持模型的 suppress_tokens 預設，不額外覆寫
 
     train_ds = JsonlASRDataset(args.train_jsonl, processor, audio_root=args.audio_root)
     dev_ds   = JsonlASRDataset(args.dev_jsonl, processor, audio_root=args.audio_root)
     collator = DataCollator(processor)
 
-    # 解碼設定
+    # 解碼設定（對齊 Track1 的通用配置；不使用語言強制提示）
     gen_kwargs = dict(
         do_sample=False,
-        num_beams=5,              # pilot-test 可先 5；若 OOM 可臨時改 1
+        num_beams=5,
+        temperature=0.0,
+        no_repeat_ngram_size=3,
         length_penalty=1.0,
-        suppress_tokens=None,
+        max_new_tokens=256,
+        # 保留模型預設 suppress_tokens
         output_scores=False,
         return_dict_in_generate=False,
     )
 
     # 訓練參數（為 24GB 卡調的值）
+    # 讓 save 與 eval 的節奏一致，避免 best model 在 step 發生但只在 epoch 儲存
+    _save_strategy = args.eval_strategy
+    _save_steps = (args.eval_steps if args.eval_strategy == "steps" else None)
+
     hf_args = TrainingArguments(
         output_dir=str(args.out_dir),
         per_device_train_batch_size=int(args.batch_size),
@@ -220,12 +230,14 @@ def main():
         max_grad_norm=1.0,
         label_smoothing_factor=0.1,
         logging_steps=25,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
+        evaluation_strategy=args.eval_strategy,
+        eval_steps=(args.eval_steps if args.eval_strategy == "steps" else None),
+        save_strategy=_save_strategy,
+        save_steps=_save_steps,
         load_best_model_at_end=True,
         metric_for_best_model="eval_ser",
         greater_is_better=False,
-        report_to=([] if args.report_to=="none" else [args.report_to]),
+        report_to="tensorboard",
         remove_unused_columns=False,
         save_total_limit=2,
         eval_accumulation_steps=32,
@@ -248,8 +260,9 @@ def main():
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
             self.model.eval()
             preds, refs = [], []
-            utt_ids_all, audio_paths_all, groups_all, durs_all = [], [], [], []
+            utt_ids_all, audio_paths_all, groups_all, durs_all, has_ast_all = [], [], [], [], []
             total_audio_sec = 0.0
+            total_loss, total_items = 0.0, 0
             # loader
             loader = torch.utils.data.DataLoader(
                 eval_dataset,
@@ -258,7 +271,6 @@ def main():
                 num_workers=2,
                 pin_memory=True,
             )
-            import time, math
             t0 = time.time()
             # reset GPU peak mem
             if torch.cuda.is_available():
@@ -272,6 +284,13 @@ def main():
                     feats = batch["input_features"].to(self.model.device, non_blocking=True)
                     model_dtype = next(self.model.parameters()).dtype
                     feats = feats.to(dtype=model_dtype)
+                    # teacher-forced loss
+                    labels = batch["labels"].to(self.model.device, non_blocking=True)
+                    out = self.model(input_features=feats, labels=labels)
+                    loss_val = float(out.loss.detach().cpu().item())
+                    bs_l = labels.size(0)
+                    total_loss += loss_val * bs_l
+                    total_items += bs_l
                     ids = self.model.generate(input_features=feats, **gen_kwargs)
                     hyp = processor.batch_decode(ids, skip_special_tokens=True)
                     hyp = [re.sub(r'[^a-z0-9\s]', ' ', t.lower()) for t in hyp]
@@ -293,6 +312,7 @@ def main():
                     durs = [float(x) for x in batch.get("duration_sec", [0.0]*bs)]
                     durs_all.extend(durs)
                     total_audio_sec += float(sum(durs))
+                    has_ast_all.extend([bool(x) for x in batch.get("has_ast", [False]*bs)])
 
             # Overall SER
             ser = ser_metric(preds, refs)
@@ -316,10 +336,17 @@ def main():
                 return dp[m]
             # per-utt SER for hardest list
             per_ser = []
+            len_ratios, hyp_lens, ref_lens = [], [], []
             for h, r in zip(preds, refs):
                 ht, rt = tokens(h), tokens(r)
                 E = ed_tok(ht, rt)
                 per_ser.append(100.0 * E / max(1, len(rt)))
+                rlen = len(rt)
+                hlen = len(ht)
+                ref_len_safe = max(1, rlen)
+                len_ratios.append((hlen / ref_len_safe) if ref_len_safe > 0 else float('nan'))
+                hyp_lens.append(hlen)
+                ref_lens.append(rlen)
 
             # Group SERs
             group_ser: Dict[str, float] = {}
@@ -345,6 +372,12 @@ def main():
                     gr = [refs[i] for i in idx]
                     bucket_ser[name] = ser_metric(gp, gr)
 
+            # Asterisk sensitivity (與 Track1 對齊)
+            idx_has = [i for i, f in enumerate(has_ast_all) if f]
+            idx_no = [i for i, f in enumerate(has_ast_all) if not f]
+            ser_has = ser_metric([preds[i] for i in idx_has], [refs[i] for i in idx_has]) if idx_has else float('nan')
+            ser_no = ser_metric([preds[i] for i in idx_no], [refs[i] for i in idx_no]) if idx_no else float('nan')
+
             # Throughput and memory
             wall = max(1e-6, time.time() - t0)
             sps = (total_audio_sec / wall) if wall > 0 else float('nan')
@@ -357,30 +390,65 @@ def main():
 
             # Dump Top-K hardest samples
             try:
-                hardest_k = 50
-                per = list(zip(utt_ids_all, audio_paths_all, groups_all, durs_all, refs, preds, per_ser))
-                per.sort(key=lambda x: (-x[6], -x[3]))  # sort by SER desc, then duration desc
+                hardest_k = max(1, int(args.hardest_k))
+                per = list(zip(utt_ids_all, audio_paths_all, groups_all, durs_all, has_ast_all, refs, preds, per_ser))
+                per.sort(key=lambda x: (-x[7], -x[3]))  # sort by SER desc, then duration desc
                 step = getattr(self.state, 'global_step', None)
                 epoch = getattr(self.state, 'epoch', None)
                 stamp = f"step{step}" if step is not None else (f"epoch{int(epoch)}" if epoch is not None else "eval")
                 out_tsv = Path(self.args.output_dir) / f"eval_topk_hard_{stamp}.tsv"
                 with out_tsv.open('w', encoding='utf-8') as f:
-                    f.write("utt_id\tref\thyp\tser\taudio_path\tgroup\tlen_bucket\n")
+                    # Order: utt_id, ref, hyp, ser, audio_path, group, len_bucket, has_ast
+                    f.write("utt_id\tref\thyp\tser\taudio_path\tgroup\tlen_bucket\thas_ast\n")
                     def bucket_name(d: float) -> str:
                         if 0.0 <= d < 6.5: return "[0-6.5s]"
                         if 6.5 <= d < 9.6: return "[6.5-9.6]"
                         if 9.6 <= d < 12.4: return "[9.6-12.4]"
                         if 12.4 <= d < 20.0: return "[12.4-20]"
                         return ">=20"
-                    for (uid, ap, grp, dur, r, h, ser_i) in per[:hardest_k]:
-                        f.write(f"{uid}\t{r}\t{h}\t{ser_i:.2f}\t{ap}\t{grp}\t{bucket_name(float(dur))}\n")
+                    for (uid, ap, grp, dur, ha, r, h, ser_i) in per[:hardest_k]:
+                        f.write(f"{uid}\t{r}\t{h}\t{ser_i:.2f}\t{ap}\t{grp}\t{bucket_name(float(dur))}\t{int(ha)}\n")
             except Exception:
                 pass
 
-            metrics: Dict[str, Any] = {f"{metric_key_prefix}_ser": ser,
-                                        "eval_seconds_per_second": sps,
-                                        "eval_audio_hours": (total_audio_sec / 3600.0),
-                                        "eval_max_mem_gb": max_mem_gb}
+            # Degeneration: repeated token trigram stats
+            def trigram_dup_count_tokens(tokens: List[str]) -> int:
+                counts: Dict[str, int] = {}
+                for i in range(len(tokens) - 2):
+                    tri = ' '.join(tokens[i:i+3])
+                    counts[tri] = counts.get(tri, 0) + 1
+                return sum((c - 1) for c in counts.values() if c >= 2)
+            dup_counts = [trigram_dup_count_tokens(p.split()) for p in preds]
+            repeat_rate = (sum(1 for c in dup_counts if c > 0) / max(1, len(dup_counts))) if dup_counts else float('nan')
+            dup_mean = (sum(dup_counts) / max(1, len(dup_counts))) if dup_counts else float('nan')
+
+            # Length ratio stats (token-level)
+            lr_vals = [x for x in len_ratios if isinstance(x, (int, float)) and (not math.isnan(float(x)))]
+            if lr_vals:
+                lr_mean = float(sum(lr_vals) / len(lr_vals))
+                srt = sorted(lr_vals)
+                mid = len(srt) // 2
+                lr_median = float(srt[mid]) if (len(srt) % 2 == 1) else float(0.5 * (srt[mid-1] + srt[mid]))
+            else:
+                lr_mean = float('nan'); lr_median = float('nan')
+
+            eval_loss = (total_loss / max(1, total_items)) if total_items > 0 else 0.0
+
+            metrics: Dict[str, Any] = {
+                f"{metric_key_prefix}_ser": ser,
+                f"{metric_key_prefix}_loss": eval_loss,
+                "eval_seconds_per_second": sps,
+                "eval_audio_hours": (total_audio_sec / 3600.0),
+                "eval_max_mem_gb": max_mem_gb,
+                "eval_repeat_rate_3gram": repeat_rate,
+                "eval_repeat_3gram_dup_count_mean": dup_mean,
+                "eval_len_ratio_mean": lr_mean,
+                "eval_len_ratio_median": lr_median,
+                "eval_hyp_len_mean": (float(sum(hyp_lens) / len(hyp_lens)) if hyp_lens else float('nan')),
+                "eval_ref_len_mean": (float(sum(ref_lens) / len(ref_lens)) if ref_lens else float('nan')),
+                "eval_ser_has_ast": ser_has,
+                "eval_ser_no_ast": ser_no,
+            }
             for g, v in group_ser.items():
                 metrics[f"{metric_key_prefix}_ser_{g}"] = v
             for name, v in bucket_ser.items():
@@ -388,15 +456,8 @@ def main():
             # Filter out non-finite values to avoid logger errors
             safe_metrics: Dict[str, Any] = {}
             for k, v in metrics.items():
-                try:
-                    if isinstance(v, (int, float)):
-                        vf = float(v)
-                        if vf == vf:  # not NaN
-                            safe_metrics[k] = vf
-                    else:
-                        safe_metrics[k] = v
-                except Exception:
-                    pass
+                if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                    safe_metrics[k] = float(v)
 
             # Log so TensorBoard/checkpointing/early-stopping can see eval metrics
             try:
@@ -405,7 +466,7 @@ def main():
             except Exception:
                 pass
 
-            print(f"[EVAL] SER={ser:.2f}% | sps={sps:.2f} | hrs={total_audio_sec/3600.0:.3f}")
+            print(f"[EVAL] SER={ser:.2f}%  |  loss={eval_loss:.4f}  |  sps={sps:.2f}  |  hrs={(total_audio_sec/3600.0):.3f}")
             return safe_metrics
 
     trainer = SERTrainer(
