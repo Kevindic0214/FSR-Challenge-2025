@@ -30,7 +30,7 @@ import unicodedata
 from pathlib import Path
 from collections import defaultdict
 from random import Random
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 DEF_ROOT = Path("HAT-Vol2")
 DEF_OUT = DEF_ROOT / "manifests_track2"
@@ -63,8 +63,10 @@ def guess_speaker_id(wavname: str) -> str:
 def group_tag_from_speaker(spk: str) -> str:
     return spk[:2] if isinstance(spk, str) and len(spk) >= 2 else "XX"
 
-def build_audio_index(audio_root: Path) -> Dict[str, Path]:
-    """Index all *.wav under audio_root by basename for fast lookup."""
+def build_audio_index(audio_root: Path) -> Tuple[Dict[str, Path], int]:
+    """Index all *.wav under audio_root by basename for fast lookup.
+    Returns: (index, duplicate_basename_count)
+    """
     idx: Dict[str, Path] = {}
     dup = 0
     for p in audio_root.rglob("*.wav"):
@@ -75,7 +77,7 @@ def build_audio_index(audio_root: Path) -> Dict[str, Path]:
             dup += 1
     if dup > 0:
         print(f"[WARN] Audio index found {dup} duplicate basenames under {audio_root}. Using first occurrence.")
-    return idx
+    return idx, dup
 
 def find_audio(index: Dict[str, Path], audio_root: Path, wavname: str) -> Optional[Path]:
     # fast path: direct join
@@ -85,11 +87,22 @@ def find_audio(index: Dict[str, Path], audio_root: Path, wavname: str) -> Option
     # indexed lookup by basename
     return index.get(Path(wavname).name)
 
+def validate_csv_header(path: Path) -> Tuple[bool, List[str], List[str]]:
+    """Validate CSV has required columns. Returns (is_valid, missing, header)."""
+    try:
+        with path.open('r', encoding='utf-8-sig', newline='') as f:
+            reader = csv.DictReader(f)
+            header = reader.fieldnames or []
+    except Exception:
+        return False, ["<io_error>"], []
+    required = ["檔名", "客語拼音"]
+    missing = [c for c in required if c not in (header or [])]
+    return (len(missing) == 0), missing, (header or [])
+
 def read_csv_rows(csv_paths: List[Path]):
     for p in csv_paths:
         with p.open('r', encoding='utf-8-sig', newline='') as f:
             reader = csv.DictReader(f)
-            # expected headers (Chinese)
             for row in reader:
                 yield p, row
 
@@ -104,6 +117,8 @@ def main():
                     help='minimum #speakers to hold out for dev')
     ap.add_argument('--dev_ratio', type=float, default=0.10,
                     help='ratio of speakers for dev split')
+    ap.add_argument('--dev_strategy', type=str, default='fixed_balanced', choices=['fixed_balanced','ratio_proportional'],
+                    help='Dev split strategy: fixed_balanced (align Track 1), or ratio_proportional (original Track 2)')
     ap.add_argument('--seed', type=int, default=1337)
     ap.add_argument('--exclude_mispronounced', action='store_true',
                     help='drop rows whose 備註 contains "正確讀音"')
@@ -145,6 +160,21 @@ def main():
         sys.exit(1)
     print(f'[INFO] Found {len(csv_paths)} CSV files.')
 
+    # Validate CSV headers; keep only valid files
+    csv_valid: List[Path] = []
+    csv_invalid_details: Dict[str, List[str]] = {}
+    for p in csv_paths:
+        ok, missing, header = validate_csv_header(p)
+        if ok:
+            csv_valid.append(p)
+        else:
+            csv_invalid_details[str(p)] = missing
+    if not csv_valid:
+        print('[ERROR] All CSV files missing required columns (need: 檔名, 客語拼音).', file=sys.stderr)
+        sys.exit(1)
+    if csv_invalid_details:
+        print(f"[WARN] {len(csv_invalid_details)}/{len(csv_paths)} CSV files invalid headers; skipped.")
+
     rng = Random(args.seed)
 
     kept, dropped_empty, dropped_mispron, missing_audio = 0, 0, 0, 0
@@ -154,11 +184,11 @@ def main():
     dup_ids = 0
 
     # Build audio index once (performance)
-    audio_index = build_audio_index(audio_root)
+    audio_index, audio_index_dup = build_audio_index(audio_root)
 
     csv_wav_names = set()
 
-    for csv_path, row in read_csv_rows(csv_paths):
+    for csv_path, row in read_csv_rows(csv_valid):
         wav = (row.get('檔名') or '').strip()
         text_raw = (row.get('客語拼音') or '').strip()
         note = (row.get('備註') or '').strip()
@@ -215,49 +245,64 @@ def main():
     speakers = list(spk2items.keys())
     rng.shuffle(speakers)
     # Balanced dev selection across groups (DF/DM/ZF/ZM; fallback 'XX')
-    target_dev = max(args.dev_speakers, int(len(speakers) * args.dev_ratio + 0.5))
     grp2speakers: Dict[str, List[str]] = defaultdict(list)
     for spk in speakers:
         grp2speakers[group_tag_from_speaker(spk)].append(spk)
-    # shuffle within group for determinism
-    for g in grp2speakers.keys():
-        rng.shuffle(grp2speakers[g])
-    # proportional allocation with floor, then fill remainder by largest remainder
-    totals = {g: len(v) for g, v in grp2speakers.items()}
-    total_spk = sum(totals.values()) or 1
-    alloc = {g: int(target_dev * (totals[g] / total_spk)) for g in totals}
-    # Ensure at least 1 if group exists and target_dev >= number of groups
-    if target_dev >= len(totals):
-        for g in totals:
-            if totals[g] > 0:
-                alloc[g] = max(1, alloc[g])
-    # adjust to meet target_dev
-    assigned = sum(alloc.values())
-    # compute remainders for largest remainder method
-    rema = sorted(((target_dev * (totals[g] / total_spk)) - alloc[g], g) for g in totals)
-    # add or remove to match target
-    if assigned < target_dev:
-        need = target_dev - assigned
-        for _ in range(need):
-            if not rema:
-                break
-            _, g = rema.pop()  # largest remainder
-            alloc[g] = min(totals[g], alloc[g] + 1)
-    elif assigned > target_dev:
-        over = assigned - target_dev
-        for _ in range(over):
-            # remove from smallest remainder first
-            if not rema:
-                break
-            _, g = rema.pop(0)
-            alloc[g] = max(0, alloc[g] - 1)
-    # pick dev speakers based on allocation
+    # Dev split strategy
     dev_spks = set()
-    for g, n_take in alloc.items():
-        if n_take <= 0:
-            continue
-        pool = grp2speakers.get(g, [])
-        dev_spks.update(pool[:n_take])
+    dev_strategy = args.dev_strategy
+    if dev_strategy == 'fixed_balanced':
+        groups = ['DF','DM','ZF','ZM']
+        target_dev = int(args.dev_speakers)
+        base = target_dev // len(groups)
+        rem = target_dev % len(groups)
+        desired = {g: base for g in groups}
+        for g in groups[:rem]:
+            desired[g] += 1
+        for g in groups:
+            rng.shuffle(grp2speakers[g])
+        for g in groups:
+            pool = grp2speakers.get(g, [])
+            take = min(len(pool), desired[g])
+            dev_spks.update(pool[:take])
+        if len(dev_spks) < target_dev:
+            remaining = [s for s in speakers if s not in dev_spks]
+            rng.shuffle(remaining)
+            need = target_dev - len(dev_spks)
+            dev_spks.update(remaining[:need])
+        dev_spks = set(sorted(list(dev_spks))[:target_dev])
+    else:
+        target_dev = max(int(args.dev_speakers), int(len(speakers) * args.dev_ratio + 0.5))
+        for g in list(grp2speakers.keys()):
+            rng.shuffle(grp2speakers[g])
+        totals = {g: len(v) for g, v in grp2speakers.items()}
+        total_spk = sum(totals.values()) or 1
+        alloc = {g: int(target_dev * (totals[g] / total_spk)) for g in totals}
+        if target_dev >= len(totals):
+            for g in totals:
+                if totals[g] > 0:
+                    alloc[g] = max(1, alloc[g])
+        assigned = sum(alloc.values())
+        rema = sorted(((target_dev * (totals[g] / total_spk)) - alloc[g], g) for g in totals)
+        if assigned < target_dev:
+            need = target_dev - assigned
+            for _ in range(need):
+                if not rema:
+                    break
+                _, g = rema.pop()
+                alloc[g] = min(totals[g], alloc[g] + 1)
+        elif assigned > target_dev:
+            over = assigned - target_dev
+            for _ in range(over):
+                if not rema:
+                    break
+                _, g = rema.pop(0)
+                alloc[g] = max(0, alloc[g] - 1)
+        for g, n_take in alloc.items():
+            if n_take <= 0:
+                continue
+            pool = grp2speakers.get(g, [])
+            dev_spks.update(pool[:n_take])
 
     train, dev = [], []
     for spk, exs in spk2items.items():
@@ -315,13 +360,21 @@ def main():
         'duplicate_ids': dup_ids,
         'duplicates_in_csv': dup_ids,
         'csv_files': len(csv_paths),
+        'csv_files_valid': len(csv_valid),
+        'csv_files_invalid': len(csv_invalid_details),
+        'csv_invalid_missing_columns': csv_invalid_details,
         'csv_but_no_audio': missing_audio,
         'audio_not_in_csv': int(max(0, len(set(audio_index.keys()) - csv_wav_names))),
+        'audio_index_duplicate_basenames': int(audio_index_dup),
+        'seed': int(args.seed),
+        'exclude_mispronounced': bool(args.exclude_mispronounced),
+        'drop_star_syllables': bool(args.drop_star_syllables),
+        'relative_audio_path': bool(args.relative_audio_path),
         'speakers_total': len(speakers),
         'speakers_dev': len(dev_spks),
-        'dev_target': target_dev,
+        'dev_target': int(target_dev),
+        'dev_strategy': dev_strategy,
         'dev_speakers': sorted(list(dev_spks)),
-        'relative_audio_path': bool(args.relative_audio_path),
         'speakers_total_by_group': speakers_total_by_grp,
         'speakers_dev_by_group': speakers_dev_by_grp,
         'train_utt_by_group': train_utt_by_grp,
