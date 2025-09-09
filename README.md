@@ -42,9 +42,7 @@ FSR-Challenge-2025/
 ├── 📈 Evaluation
 │   ├── eval_track1_cer.py               # CER evaluation with diagnostics
 │   └── eval_track2_ser.py               # SER evaluation for pinyin
-├── �️ Utilities
-│   ├── make_keyonly_track2.py           # Generate key-only files for track 2
-├── �🚀 Pipeline Management
+├── 🚀 Pipeline Management
 │   ├── run_track1_pipeline.py           # Complete track 1 pipeline
 │   ├── run_track1_pipeline.sh           # Complete track 1 pipeline (bash)
 │   ├── run_track2_pipeline.py           # Complete track 2 pipeline
@@ -191,23 +189,15 @@ python train_whisper_lora_track2.py
 
 # Stage 3: Inference (可切換 base 模型)
 python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
-    --outfile predictions_pinyin.csv \
+    --outfile predictions_track2_pinyin.csv \
     --model openai/whisper-large-v2 \
     --lora_dir exp_track2_whisper_large_lora
 
 # Stage 4: Evaluation
 python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
-    --pred_csv predictions_pinyin.csv
+    --hyp predictions_track2_pinyin.csv
 
 ##
-```
-
-**Utility Scripts**
-```bash
-# Generate key-only files for track 2
-python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
-
-
 ```
 
 ## 📋 Detailed Component Description
@@ -369,7 +359,7 @@ python train_whisper_lora_track2.py \
 
 ### 5. Utilities
 
-**`make_keyonly_track2.py`** - Generate key-only files for Track 2 submissions
+No extra utilities for Track 2 at the moment.
 
 ## 🔧 Configuration & Customization
 
@@ -483,10 +473,7 @@ python prepare_hakka_track2.py --relative_audio_path
 # Evaluate SER against official key directory
 python eval_track2_ser.py \
   --key_dir FSR-2025-Hakka-evaluation-key \
-  --pred_csv predictions_pinyin.csv
-
-# Generate key-only files if needed (for submission preparation)
-python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
+  --hyp predictions_track2_pinyin.csv
 ```
 
 ### Debug Mode
@@ -517,7 +504,7 @@ python eval_track1_cer.py \
 # Track 2: Generate comprehensive SER error breakdown
 python eval_track2_ser.py \
     --key_dir FSR-2025-Hakka-evaluation-key \
-    --hyp predictions_pinyin.csv \
+    --hyp predictions_track2_pinyin.csv \
     --dump_err errors_ser.jsonl \
     --aligned_out aligned_ser.csv
 ```
@@ -575,7 +562,7 @@ python infer_track1.py \
 # Track 2: Tune beams/temperature
 python infer_track2.py \
     --eval_root FSR-2025-Hakka-evaluation \
-    --outfile predictions_pinyin.csv \
+    --outfile predictions_track2_pinyin.csv \
     --model openai/whisper-large-v2 \
     --lora_dir exp_track2_whisper_large_lora \
     --beams 3 --temperature 0.0
