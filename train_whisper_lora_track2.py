@@ -385,8 +385,28 @@ def main():
                 metrics[f"{metric_key_prefix}_ser_{g}"] = v
             for name, v in bucket_ser.items():
                 metrics[f"{metric_key_prefix}_ser_len_{name}"] = v
+            # Filter out non-finite values to avoid logger errors
+            safe_metrics: Dict[str, Any] = {}
+            for k, v in metrics.items():
+                try:
+                    if isinstance(v, (int, float)):
+                        vf = float(v)
+                        if vf == vf:  # not NaN
+                            safe_metrics[k] = vf
+                    else:
+                        safe_metrics[k] = v
+                except Exception:
+                    pass
+
+            # Log so TensorBoard/checkpointing/early-stopping can see eval metrics
+            try:
+                self.log(safe_metrics)
+                self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, safe_metrics)
+            except Exception:
+                pass
+
             print(f"[EVAL] SER={ser:.2f}% | sps={sps:.2f} | hrs={total_audio_sec/3600.0:.3f}")
-            return metrics
+            return safe_metrics
 
     trainer = SERTrainer(
         model=model,
