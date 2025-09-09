@@ -155,6 +155,8 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--length_penalty", type=float, default=1.0)
     ap.add_argument("--max_new_tokens", type=int, default=256)
+    ap.add_argument("--no_repeat_ngram_size", type=int, default=0,
+                    help="Set >0 to avoid repeating n-grams; 0 to disable (matches training eval)")
     ap.add_argument("--batch", type=int, default=1, help="Batch size for decoding")
     # utility
     ap.add_argument("--limit", type=int, default=0, help="If >0, decode first N items only")
@@ -274,7 +276,7 @@ def main():
                     length_penalty=float(args.length_penalty),
                     max_new_tokens=int(args.max_new_tokens),
                     suppress_tokens=None,
-                    no_repeat_ngram_size=3,
+                    no_repeat_ngram_size=max(0, int(args.no_repeat_ngram_size)),
                     forced_decoder_ids=None,
                 )
             raw_texts = processor.batch_decode(pred_ids, skip_special_tokens=True)

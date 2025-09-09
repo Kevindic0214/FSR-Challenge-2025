@@ -50,6 +50,16 @@ def edit_distance_tokens(a, b) -> int:
             prev = tmp
     return dp[m]
 
+def first_diff_index_tokens(a, b) -> int:
+    """Return first index where token lists differ; -1 if identical length/content.
+    If one is a prefix of the other, returns the shorter length.
+    """
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n if len(a) != len(b) else -1
+
 def read_key_dir(key_dir: str) -> OrderedDict:
     """
     Read all *_edit.csv under key_dir and return OrderedDict[id -> raw pinyin].
@@ -129,6 +139,7 @@ def main():
                 action="store_false",
                 help="Keep tokens starting with '*' in reference (not recommended)")
     ap.add_argument("--aligned_out", default=None, help="Per-utterance details CSV")
+    ap.add_argument("--dump_err", default=None, help="Per-utterance mismatch JSONL (like Track 1)")
     args = ap.parse_args()
 
     # Load references (prefer key_csv over key_dir if both given)
@@ -150,6 +161,7 @@ def main():
     extra   = [uid for uid in hyp_raw.keys() if uid not in ref_raw]
 
     aligned_rows = []
+    err_f = open(args.dump_err, "w", encoding="utf-8") if args.dump_err else None
     for uid, ref_txt in ref_raw.items():
         hyp_txt = hyp_raw.get(uid, "")
         ref_tok = tokenize_pinyin(ref_txt, drop_star_tokens=args.drop_star_tokens)
@@ -162,6 +174,20 @@ def main():
         n += 1
         utt_ser = (edits / rl) if rl > 0 else (0.0 if len(hyp_tok) == 0 else 1.0)
         aligned_rows.append([uid, " ".join(ref_tok), " ".join(hyp_tok), rl, edits, f"{utt_ser:.6f}"])
+        if err_f and ref_tok != hyp_tok:
+            err = {
+                "utt_id": uid,
+                "ref_raw": ref_txt,
+                "hyp_raw": hyp_txt,
+                "ref_tok": ref_tok,
+                "hyp_tok": hyp_tok,
+                "ref_len": rl,
+                "edits": edits,
+                "first_diff_tok": first_diff_index_tokens(ref_tok, hyp_tok),
+                "utt_ser": utt_ser,
+            }
+            import json as _json
+            err_f.write(_json.dumps(err, ensure_ascii=False) + "\n")
 
     if args.aligned_out:
         with open(args.aligned_out, "w", encoding="utf-8", newline="") as fa:
@@ -171,6 +197,8 @@ def main():
             # keep original ref order
             for row in aligned_rows:
                 w.writerow(row)
+    if err_f:
+        err_f.close()
 
     ser = (total_edits / total_ref_tokens) if total_ref_tokens > 0 else 0.0
     exact_rate = (exact / n) if n > 0 else 0.0
@@ -180,6 +208,8 @@ def main():
     print(f"[AS-IS] SER = {ser:.4f} ({ser*100:.2f}%), EM = {exact_rate*100:.2f}%")
     if args.aligned_out:
         print(f"Aligned output -> {args.aligned_out}")
+    if args.dump_err:
+        print(f"Errors JSONL -> {args.dump_err}")
 
 if __name__ == "__main__":
     main()
