@@ -37,10 +37,8 @@ FSR-Challenge-2025/
 │   ├── train_whisper_lora_track1.py     # Whisper-large-v2 + LoRA training (hanzi)
 │   └── train_whisper_lora_track2.py     # Whisper-large-v2 + LoRA training (pinyin)
 ├── 🔮 Inference
-│   ├── infer_hakka_hanzi_warmup.py      # Batch inference for hanzi evaluation
-│   ├── infer_hakka_pinyin_warmup.py     # Batch inference for pinyin evaluation
-│   ├── infer_whisper_track2.py          # Alternative inference for track 2
-│   └── quick_infer_one.py               # Quick single-file inference
+│   ├── infer_track1.py                  # Batch inference for hanzi (Track 1)
+│   └── infer_track2.py                  # Batch inference for pinyin (Track 2)
 ├── 📈 Evaluation
 │   ├── eval_track1_cer.py               # CER evaluation with diagnostics
 │   ├── eval_track2_ser.py               # SER evaluation for pinyin
@@ -153,9 +151,10 @@ python prepare_hakka_track1.py --root HAT-Vol2 --drop_mispronounce
 python train_whisper_lora_track1.py --train_jsonl HAT-Vol2/manifests_track1/train.jsonl
 
 # Stage 3: Inference
-python infer_hakka_hanzi_warmup.py --eval_root FSR-2025-Hakka-evaluation \
-    --model openai/whisper-large-v2 --lora_dir runs/track1/lora_v2_r16_e3 \
-    --outfile predictions.csv
+python infer_track1.py --eval_root FSR-2025-Hakka-evaluation \
+    --outfile predictions.csv \
+    --model openai/whisper-large-v2 \
+    --lora_dir runs/track1/lora_v2_r16_e3
 
 # Stage 4: Evaluation
 python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
@@ -192,14 +191,10 @@ python prepare_hakka_track2.py --data_root HAT-Vol2 --out_dir HAT-Vol2/manifests
 python train_whisper_lora_track2.py
 
 # Stage 3: Inference (可切換 base 模型)
-python infer_hakka_pinyin_warmup.py --eval_root FSR-2025-Hakka-evaluation \
-    --lora_dir exp_track2_whisper_large_lora \
+python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
+    --outfile predictions_pinyin.csv \
     --model openai/whisper-large-v2 \
-    --outfile predictions_pinyin.csv
-
-# Alternative inference method
-python infer_whisper_track2.py --eval_root FSR-2025-Hakka-evaluation \
-    --lora_dir runs/track2/lora_v2_r16_e3 --outfile predictions_pinyin.csv
+    --lora_dir exp_track2_whisper_large_lora
 
 # Stage 4: Evaluation
 python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
@@ -214,8 +209,8 @@ python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
 # Generate key-only files for track 2
 python make_keyonly_track2.py --key_dir FSR-2025-Hakka-evaluation-key
 
-# Quick inference for a single file
-python quick_infer_one.py runs/track1/whisper_v2_lora path/to/audio.wav
+# (Optional) Quick SER check on any two CSVs
+python quick_ser_check.py --hyp predictions_pinyin.csv --ref reference.csv
 ```
 
 ## 📋 Detailed Component Description
@@ -319,10 +314,8 @@ python train_whisper_lora_track2.py \
 
 ### 3. Inference
 
-**Track 1: `infer_hakka_hanzi_warmup.py`** - Hanzi Recognition Inference
-**Track 2: `infer_hakka_pinyin_warmup.py`** - Pinyin Recognition Inference
-**Alternative: `infer_whisper_track2.py`** - Alternative Track 2 Inference
-**Utility: `quick_infer_one.py`** - Single File Quick Inference
+**Track 1: `infer_track1.py`** - Hanzi Recognition Inference
+**Track 2: `infer_track2.py`** - Pinyin Recognition Inference
 
 **Input Modes:**
 - Directory scanning: Recursively finds `*.wav` files
@@ -334,7 +327,7 @@ python train_whisper_lora_track2.py \
 --beams 1                    # Beam search size (1=greedy)
 --temperature 0.0            # Sampling temperature  
 --max_new_tokens 256         # Maximum decode length
---strip_asterisk             # Remove * markers in output
+--strip_asterisk             # (Track 1) Remove * markers in output
 --key_csv_filter             # Filter by official key file
 ```
 
@@ -381,7 +374,6 @@ python train_whisper_lora_track2.py \
 ### 5. Utilities
 
 **`make_keyonly_track2.py`** - Generate key-only files for Track 2 submissions
-**`quick_infer_one.py`** - Quick inference for single audio files
 **`quick_ser_check.py`** - Quick SER validation for Track 2
 
 ## 🔧 Configuration & Customization
@@ -576,17 +568,19 @@ python train_whisper_lora_track1.py \
 ### Batch Inference with Custom Settings  
 ```bash
 # Track 1: Use different decoding strategy
-python infer_hakka_hanzi_warmup.py \
+python infer_track1.py \
     --eval_root FSR-2025-Hakka-evaluation \
-    --lora_dir runs/track1/lora_v2_r16_e3 \
     --outfile predictions.csv \
+    --model openai/whisper-large-v2 \
+    --lora_dir runs/track1/lora_v2_r16_e3 \
     --beams 5 --temperature 0.1 --length_penalty 1.2
 
-# Track 2: Use alternative inference method
-python infer_whisper_track2.py \
+# Track 2: Tune beams/temperature
+python infer_track2.py \
     --eval_root FSR-2025-Hakka-evaluation \
-    --lora_dir runs/track2/lora_v2_r16_e3 \
     --outfile predictions_pinyin.csv \
+    --model openai/whisper-large-v2 \
+    --lora_dir exp_track2_whisper_large_lora \
     --beams 3 --temperature 0.0
 ```
 
