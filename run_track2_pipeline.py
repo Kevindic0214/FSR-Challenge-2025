@@ -46,7 +46,7 @@ DEFAULT_CONFIG = {
     # Stage 3: Inference (train script is self-configured)
     "inference": {
         "beams": 1,            # greedy for speed; change if needed
-        "batch": 1             # infer_hakka_pinyin_warmup.py default
+        "batch": 1             # batch size for decoding
     },
 
     # Stage 4: Evaluation
@@ -187,11 +187,11 @@ def stage_3_inference(config: Dict[str, Any]) -> bool:
         return False
     cfg = config["inference"]
     cmd = [
-        "python", "infer_hakka_pinyin_warmup.py",
+        "python", "infer_track2.py",
         "--eval_root", str(eval_data),
-        "--lora_dir", str(model_dir),
         "--outfile", config["pred_file"],
         "--model", config["base_model"],
+        "--lora_dir", str(model_dir),
         "--beams", str(cfg["beams"]),
         "--batch", str(cfg["batch"]),
     ]

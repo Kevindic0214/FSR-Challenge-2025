@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# FSR-2025 Hakka ASR Track 2 Complete Pipeline
+# FSR-2025 Hakka ASR Track 2 Complete Pipeline (using infer_track2.py)
 # Usage: ./run_track2_pipeline.sh [stage_start] [stage_end]
 # Stages: 1=prepare, 2=train, 3=infer, 4=eval
 
@@ -13,6 +13,7 @@ MODEL_DIR="exp_track2_whisper_large_lora"   # train_whisper_lora_track2.py defau
 PRED_FILE="predictions_track2_pinyin.csv"
 EVAL_KEY_DIR="FSR-2025-Hakka-evaluation-key"
 EVAL_DATA_DIR="FSR-2025-Hakka-evaluation"
+BASE_MODEL="openai/whisper-large-v2"
 
 # Parse args
 STAGE_START=${1:-1}
@@ -66,10 +67,11 @@ if [ $STAGE_START -le 3 ] && [ $STAGE_END -ge 3 ]; then
   if [ ! -d "$EVAL_DATA_DIR" ]; then
     echo "ERROR: Eval data dir not found: $EVAL_DATA_DIR"; exit 1
   fi
-  python infer_hakka_pinyin_warmup.py \
+  python infer_track2.py \
     --eval_root "$EVAL_DATA_DIR" \
-    --lora_dir "$MODEL_DIR" \
     --outfile "$PRED_FILE" \
+    --model "$BASE_MODEL" \
+    --lora_dir "$MODEL_DIR" \
     --beams 1 \
     --batch 1
   echo "Inference completed. Results saved to $PRED_FILE"
@@ -95,4 +97,3 @@ fi
 
 echo "=== Pipeline Complete ==="
 echo "All requested stages finished."
-
