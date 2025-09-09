@@ -9,7 +9,7 @@ FSR-2025 Track 2 (Pinyin) Inference - R2
 - Robust pinyin normalization aligned with eval (NFKC, remove zero-width, keep a-z0-9, squeeze spaces)
 - Auto-detect eval input: directory of wavs or *.jsonl manifest (optional --root for relative paths)
 - Optional key filter to keep rows that appear in official key CSV/TXT
-- Output CSV header: 錄音檔檔名,辨認出之客語漢字 (content is pinyin)
+- Output CSV header: 錄音檔檔名,辨認結果 (content is pinyin)
 """
 
 import argparse
@@ -142,8 +142,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval_root", type=Path, default=Path("FSR-2025-Hakka-evaluation"),
                     help="Directory of wavs OR path to a *.jsonl manifest (auto-detected)")
-    ap.add_argument("--outfile", type=Path, default=Path("Level-Up_拼音.csv"),
-                    help="Output CSV path (e.g., '單位_隊名_拼音.csv')")
+    ap.add_argument("--outfile", type=Path, required=True,
+                    help="Output CSV path (e.g., 'predictions_track2_pinyin.csv')")
     ap.add_argument("--model", type=str, default="openai/whisper-large-v2",
                     help="Base Whisper model, e.g., openai/whisper-large-v2 or -v3-turbo")
     ap.add_argument("--lora_dir", type=Path, default=Path("exp_track2_whisper_large_lora"),
@@ -245,7 +245,8 @@ def main():
     gc = model.generation_config
     with args.outfile.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["錄音檔檔名", "辨認出之客語漢字"])  # content is pinyin
+        # Align Track 1 header format (second column name unified)
+        w.writerow(["錄音檔檔名", "辨認結果"])  # content is pinyin
         rng = range(0, len(pair_list), bs)
         for i in tqdm(rng, ncols=100, desc="Decoding"):
             chunk = pair_list[i:i+bs]
@@ -292,7 +293,7 @@ def main():
         log_f.close()
 
     print(f"[INFO] Wrote {n_ok} rows → {args.outfile}")
-    print("[HINT] Evaluate with: python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key --pred_csv", args.outfile)
+    print("[HINT] Evaluate with: python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key --hyp", args.outfile)
 
 if __name__ == "__main__":
     main()

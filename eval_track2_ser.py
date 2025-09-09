@@ -72,9 +72,32 @@ def read_key_dir(key_dir: str) -> OrderedDict:
                     od[uid] = py
     return od
 
+def read_key_csv(csv_path: str) -> OrderedDict:
+    """
+    Read a single key CSV and return OrderedDict[id -> raw pinyin].
+    Requires columns: 「檔名」, 「客語拼音」.
+    """
+    p = csv_path
+    od = OrderedDict()
+    with open(p, "r", encoding="utf-8-sig", newline="") as f:
+        rdr = csv.DictReader(f)
+        if not rdr.fieldnames or ("檔名" not in rdr.fieldnames or "客語拼音" not in rdr.fieldnames):
+            raise SystemExit(f"Expected headers 「檔名」 and 「客語拼音」 in {p}")
+        for row in rdr:
+            fn = (row["檔名"] or "").strip()
+            uid = os.path.splitext(os.path.basename(fn))[0]
+            py = (row["客語拼音"] or "").strip()
+            if uid and uid not in od:
+                od[uid] = py
+    if not od:
+        raise SystemExit(f"[ERROR] No refs found in {p}")
+    return od
+
 def read_pred_csv(pred_csv: str) -> dict:
     """
-    Read your Level-Up_拼音.csv: first column filename, second column hypothesis.
+    Read prediction CSV: first column is filename, second column is hypothesis.
+    - Header row allowed (will be skipped heuristically)
+    - Compatible with Track 1 format: "錄音檔檔名,辨認結果"
     """
     mp = {}
     with open(pred_csv, "r", encoding="utf-8-sig", newline="") as f:
@@ -95,18 +118,27 @@ def read_pred_csv(pred_csv: str) -> dict:
 
 # ---------------- main ----------------
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate Track2 SER (syllable-level WER) from Level-Up_拼音.csv")
-    ap.add_argument("--key_dir",  required=True, help="FSR-2025-Hakka-evaluation-key directory (contains *_edit.csv)")
-    ap.add_argument("--pred_csv", required=True, help="Level-Up_拼音.csv (filename,hypothesis)")
+    ap = argparse.ArgumentParser(description="Evaluate Track2 SER (syllable-level WER)")
+    ap.add_argument("--key_csv",  required=False, help="Official key CSV file (with 檔名,客語拼音)")
+    ap.add_argument("--key_dir",  required=False, help="FSR-2025-Hakka-evaluation-key directory (contains *_edit.csv)")
+    ap.add_argument("--hyp", "--pred_csv", dest="pred_csv", required=True,
+                    help="Prediction CSV (錄音檔檔名,辨認結果)")
     ap.add_argument("--drop_star_tokens", action="store_true", default=True,
                     help="Drop tokens starting with '*' from reference (recommended)")
     ap.add_argument("--keep_star_tokens", dest="drop_star_tokens",
                 action="store_false",
                 help="Keep tokens starting with '*' in reference (not recommended)")
-    ap.add_argument("--aligned_out", default="aligned_pinyin.csv", help="Per-utterance details CSV")
+    ap.add_argument("--aligned_out", default=None, help="Per-utterance details CSV")
     args = ap.parse_args()
 
-    ref_raw = read_key_dir(args.key_dir)
+    # Load references (prefer key_csv over key_dir if both given)
+    if args.key_csv:
+        ref_raw = read_key_csv(args.key_csv)
+    elif args.key_dir:
+        ref_raw = read_key_dir(args.key_dir)
+    else:
+        raise SystemExit("Provide one of --key_csv or --key_dir")
+
     hyp_raw = read_pred_csv(args.pred_csv)
 
     total_ref_tokens = 0
@@ -117,34 +149,37 @@ def main():
     missing = [uid for uid in ref_raw.keys() if uid not in hyp_raw]
     extra   = [uid for uid in hyp_raw.keys() if uid not in ref_raw]
 
-    with open(args.aligned_out, "w", encoding="utf-8", newline="") as fa:
-        w = csv.writer(fa)
-        w.writerow(["id","ref","hyp","ref_len","utt_SER"])  # utt_SER = per-utt syllable WER
-        for uid, ref_txt in ref_raw.items():
-            hyp_txt = hyp_raw.get(uid, "")
-            ref_tok = tokenize_pinyin(ref_txt, drop_star_tokens=args.drop_star_tokens)
-            hyp_tok = tokenize_pinyin(hyp_txt, drop_star_tokens=False)  # hyp usually has no '*'
-            edits = edit_distance_tokens(ref_tok, hyp_tok)
-            rl = len(ref_tok)
-            total_edits += edits
-            total_ref_tokens += rl
-            exact += 1 if ref_tok == hyp_tok else 0
-            n += 1
-            utt_ser = (edits / rl) if rl > 0 else (0.0 if len(hyp_tok) == 0 else 1.0)
-            w.writerow([uid, " ".join(ref_tok), " ".join(hyp_tok), rl, f"{utt_ser:.4f}"])
+    aligned_rows = []
+    for uid, ref_txt in ref_raw.items():
+        hyp_txt = hyp_raw.get(uid, "")
+        ref_tok = tokenize_pinyin(ref_txt, drop_star_tokens=args.drop_star_tokens)
+        hyp_tok = tokenize_pinyin(hyp_txt, drop_star_tokens=False)  # hyp usually has no '*'
+        edits = edit_distance_tokens(ref_tok, hyp_tok)
+        rl = len(ref_tok)
+        total_edits += edits
+        total_ref_tokens += rl
+        exact += 1 if ref_tok == hyp_tok else 0
+        n += 1
+        utt_ser = (edits / rl) if rl > 0 else (0.0 if len(hyp_tok) == 0 else 1.0)
+        aligned_rows.append([uid, " ".join(ref_tok), " ".join(hyp_tok), rl, edits, f"{utt_ser:.6f}"])
+
+    if args.aligned_out:
+        with open(args.aligned_out, "w", encoding="utf-8", newline="") as fa:
+            w = csv.writer(fa)
+            # Align header style with Track 1 (field names and order)
+            w.writerow(["utt_id","ref","hyp","ref_len","edits","utt_ser"])  # per-utt SER
+            # keep original ref order
+            for row in aligned_rows:
+                w.writerow(row)
 
     ser = (total_edits / total_ref_tokens) if total_ref_tokens > 0 else 0.0
     exact_rate = (exact / n) if n > 0 else 0.0
 
-    print("=== Track2 evaluation (SER = syllable-level WER) ===")
-    print(f"UTT={n}  REF_TOKENS={total_ref_tokens}  TOTAL_EDITS={total_edits}")
-    print(f"SER: {ser:.4f}")
-    print(f"Sentence exact-match rate: {exact_rate:.4f}")
-    if missing:
-        print(f"[WARN] Missing predictions: {len(missing)} (counted as deletions).")
-    if extra:
-        print(f"[INFO] Extra predictions (ignored): {len(extra)}")
-    print(f"Per-utterance details -> {args.aligned_out}")
+    matched = len(ref_raw) - len(missing)
+    print(f"[INFO] Coverage: matched {matched}/{len(ref_raw)} refs; missing={len(missing)}; extra={len(extra)} (pred-only)")
+    print(f"[AS-IS] SER = {ser:.4f} ({ser*100:.2f}%), EM = {exact_rate*100:.2f}%")
+    if args.aligned_out:
+        print(f"Aligned output -> {args.aligned_out}")
 
 if __name__ == "__main__":
     main()
