@@ -3,13 +3,18 @@
 
 """
 Prepare manifests for FSR-2025 Track 1 (Hakka Hanzi).
-Key improvements:
+
+What it does (aligned with Track 2):
 - Robust text normalization (NFKC, zero-width removal, optional punctuation stripping).
 - CSV duplicate-key detection and coverage auditing.
 - Balanced dev speaker selection across DF/DM/ZF/ZM (with XX fallback), reproducible via --seed.
-- Portable audio paths via --relative_audio_path.
+- Portable audio paths via --relative_audio_path (relative to --root).
 - Persisted diagnostics: prepare_report.json (+ optional --stats_out) and dev_speakers.txt.
-- JSONL schema: {"utt_id","audio","hanzi","text","group"} (text == normalized hanzi).
+- JSONL schema: {"utt_id","audio","hanzi","text","speaker","group"} (text == normalized hanzi).
+
+Notes:
+- Mispronounced filtering can be toggled by --drop_mispronounce (alias: --exclude_mispronounced).
+- Asterisk handling can be toggled by --strip_asterisk or --keep_asterisk.
 """
 
 import argparse
@@ -160,9 +165,12 @@ def main():
     # Mispronunciation filtering: mutually exclusive
     misgrp = ap.add_mutually_exclusive_group()
     misgrp.add_argument("--drop_mispronounce", action="store_true",
-                        help="Filter samples whose remarks contain '正確讀音' (recommended)")
+                        help="Filter samples whose 備註 contain '正確讀音' (recommended)")
+    # alias for consistency with Track 2
+    misgrp.add_argument("--exclude_mispronounced", dest="drop_mispronounce", action="store_true",
+                        help="Alias of --drop_mispronounce (Track 2 naming)")
     misgrp.add_argument("--keep_mispronounce", action="store_true",
-                        help="Keep samples whose remarks contain '正確讀音' (mutually exclusive with --drop_mispronounce)")
+                        help="Keep samples whose 備註 contain '正確讀音'")
 
     # Asterisk handling (co-articulation marker): mutually exclusive
     astgrp = ap.add_mutually_exclusive_group()
@@ -245,6 +253,7 @@ def main():
             "audio": audio_path,
             "hanzi": hanzi,
             "text": hanzi,  # downstream convenience; keep 'hanzi' for auditing
+            "speaker": spk,
             "group": group_tag_from_speaker(spk),
         })
         kept += 1
