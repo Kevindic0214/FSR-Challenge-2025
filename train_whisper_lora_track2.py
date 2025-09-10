@@ -338,10 +338,17 @@ def main():
                     feats = batch["input_features"].to(self.model.device, non_blocking=True)
                     model_dtype = next(self.model.parameters()).dtype
                     feats = feats.to(dtype=model_dtype)
-                    # teacher-forced loss
+                    # teacher-forced loss (aligned with train: shift + label smoothing)
                     labels = batch["labels"].to(self.model.device, non_blocking=True)
                     out = self.model(input_features=feats, labels=labels)
-                    loss_val = float(out.loss.detach().cpu().item())
+                    logits = out.logits[:, :-1, :].contiguous().float()
+                    target = labels[:, 1:].contiguous()
+                    loss_val = F.cross_entropy(
+                        logits.view(-1, logits.size(-1)),
+                        target.view(-1),
+                        ignore_index=-100,
+                        label_smoothing=self.args.label_smoothing_factor,
+                    ).item()
                     bs_l = labels.size(0)
                     total_loss += loss_val * bs_l
                     total_items += bs_l
