@@ -32,27 +32,71 @@ from collections import defaultdict
 from random import Random
 from typing import Optional, List, Dict, Tuple
 
+# Accept umlaut variants and pinyin column aliases
+UMLAUTS = {
+    "ü": "v", "ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v",
+    "Ü": "v", "Ǖ": "v", "Ǘ": "v", "Ǚ": "v", "Ǜ": "v",
+}
+PINYIN_COL_ALIASES = ["客語拼音", "拼音", "客語羅馬字"]  # accept synonyms
+
 DEF_ROOT = Path("HAT-Vol2")
 DEF_OUT = DEF_ROOT / "manifests_track2"
 
-STAR_SYL_RE = re.compile(r'\s*\*[a-z]+[0-9]+\s*', flags=re.I)
+# allow *ki53 OR ki53* (surrounded by optional spaces)
+STAR_SYL_RE = re.compile(r'\s*(\*[a-z]+[0-9]+|[a-z]+[0-9]+\*)\s*', flags=re.I)
 _ZW_RE = re.compile(r"[\u200B-\u200F\uFEFF]")
 ALLOW_RE = re.compile(r'[^a-z0-9\s]')
 
-def norm_pinyin(s: str, drop_star_syllables: bool = True) -> str:
+def norm_pinyin(
+    s: str,
+    drop_star_syllables: bool = True,
+    fix_split_tone: bool = False,
+) -> str:
     if s is None:
         return ""
     # Unicode normalize and remove zero-width chars to align with inference
     s = unicodedata.normalize("NFKC", s).strip()
     s = _ZW_RE.sub("", s)
+
+    # 1) normalize umlaut policy BEFORE lower-casing
+    #    unify all ü-variants and "u:" to "v"
+    tmp = []
+    for ch in s:
+        if ch in UMLAUTS:
+            tmp.append("v")
+        else:
+            tmp.append(ch)
+    s = "".join(tmp)
+    s = s.replace("u:", "v").replace("U:", "v")
+
     s = s.lower()
-    # optionally remove starred (unpronounced) syllables like "*ki53"
+
+    # 2) optionally remove starred (unpronounced) syllables like "*ki53" or "ki53*"
     if drop_star_syllables:
         s = STAR_SYL_RE.sub(' ', s)
-    # keep only ascii letters/digits/spaces
+
+    # 3) keep only ascii letters/digits/spaces
     s = ALLOW_RE.sub(' ', s)
-    # squeeze spaces
-    s = ' '.join(s.split())
+
+    # 4) optionally merge split tone forms: "ki 53" -> "ki53"
+    if fix_split_tone:
+        toks = s.split()
+        merged: List[str] = []
+        for t in toks:
+            if t.isdigit():
+                try:
+                    val = int(t)
+                except Exception:
+                    val = -1
+                if 1 <= val <= 99 and merged and merged[-1].isalpha():
+                    merged[-1] = merged[-1] + t
+                else:
+                    merged.append(t)
+            else:
+                merged.append(t)
+        s = ' '.join(merged)
+    else:
+        s = ' '.join(s.split())
     return s
 
 def guess_speaker_id(wavname: str) -> str:
@@ -95,16 +139,25 @@ def validate_csv_header(path: Path) -> Tuple[bool, List[str], List[str]]:
             header = reader.fieldnames or []
     except Exception:
         return False, ["<io_error>"], []
-    required = ["檔名", "客語拼音"]
-    missing = [c for c in required if c not in (header or [])]
-    return (len(missing) == 0), missing, (header or [])
+    # accept aliases for the pinyin column
+    required_name_col = "檔名"
+    pinyin_col = next((c for c in PINYIN_COL_ALIASES if c in (header or [])), None)
+    ok = (required_name_col in (header or [])) and (pinyin_col is not None)
+    missing = []
+    if required_name_col not in (header or []):
+        missing.append(required_name_col)
+    if pinyin_col is None:
+        missing.append(" or ".join(PINYIN_COL_ALIASES))
+    return ok, missing, (header or [])
 
 def read_csv_rows(csv_paths: List[Path]):
     for p in csv_paths:
         with p.open('r', encoding='utf-8-sig', newline='') as f:
             reader = csv.DictReader(f)
+            header = reader.fieldnames or []
+            pinyin_key = next((k for k in PINYIN_COL_ALIASES if k in header), None)
             for row in reader:
-                yield p, row
+                yield p, row, pinyin_key
 
 def main():
     ap = argparse.ArgumentParser()
@@ -138,6 +191,9 @@ def main():
                      help='Alias of --drop_star_syllables')
     ast.add_argument('--keep_asterisk', dest='drop_star_syllables', action='store_false',
                      help='Alias of --keep_star_syllables')
+    # Optional fix for split tone forms
+    ap.add_argument('--fix_split_tone', action='store_true',
+                    help='Merge patterns like "ki 53" into "ki53" (default: off)')
     # Diagnostics / outputs
     ap.add_argument('--stats_out', type=Path, default=None,
                     help='optional path to write stats json (e.g., manifests_track2/stats.json)')
@@ -170,7 +226,8 @@ def main():
         else:
             csv_invalid_details[str(p)] = missing
     if not csv_valid:
-        print('[ERROR] All CSV files missing required columns (need: 檔名, 客語拼音).', file=sys.stderr)
+        alias_str = '/'.join(PINYIN_COL_ALIASES)
+        print(f'[ERROR] All CSV files missing required columns (need: 檔名 and one of [{alias_str}]).', file=sys.stderr)
         sys.exit(1)
     if csv_invalid_details:
         print(f"[WARN] {len(csv_invalid_details)}/{len(csv_paths)} CSV files invalid headers; skipped.")
@@ -188,9 +245,10 @@ def main():
 
     csv_wav_names = set()
 
-    for csv_path, row in read_csv_rows(csv_valid):
+    for csv_path, row, pinyin_key in read_csv_rows(csv_valid):
         wav = (row.get('檔名') or '').strip()
-        text_raw = (row.get('客語拼音') or '').strip()
+        # use pre-detected pinyin column key for this CSV
+        text_raw = (row.get(pinyin_key) or '').strip() if pinyin_key else ''
         note = (row.get('備註') or '').strip()
 
         if not wav:
@@ -201,7 +259,11 @@ def main():
             dropped_mispron += 1
             continue
 
-        text = norm_pinyin(text_raw, drop_star_syllables=bool(args.drop_star_syllables))
+        text = norm_pinyin(
+            text_raw,
+            drop_star_syllables=bool(args.drop_star_syllables),
+            fix_split_tone=bool(args.fix_split_tone),
+        )
         if not text:
             dropped_empty += 1
             continue
@@ -253,7 +315,8 @@ def main():
     dev_strategy = args.dev_strategy
     if dev_strategy == 'fixed_balanced':
         groups = ['DF','DM','ZF','ZM']
-        target_dev = int(args.dev_speakers)
+        # use max(dev_speakers, ceil(#speakers * dev_ratio)) to match docstring
+        target_dev = max(int(args.dev_speakers), int(len(speakers) * args.dev_ratio + 0.5))
         base = target_dev // len(groups)
         rem = target_dev % len(groups)
         desired = {g: base for g in groups}
@@ -273,6 +336,7 @@ def main():
         dev_spks = set(sorted(list(dev_spks))[:target_dev])
     else:
         target_dev = max(int(args.dev_speakers), int(len(speakers) * args.dev_ratio + 0.5))
+        target_dev = min(target_dev, len(speakers))
         for g in list(grp2speakers.keys()):
             rng.shuffle(grp2speakers[g])
         totals = {g: len(v) for g, v in grp2speakers.items()}
@@ -298,6 +362,10 @@ def main():
                     break
                 _, g = rema.pop(0)
                 alloc[g] = max(0, alloc[g] - 1)
+        # final sanity: ensure allocation sum matches target_dev
+        assert sum(alloc.values()) == target_dev, (
+            f"ratio_proportional allocation mismatch: got {sum(alloc.values())}, target {target_dev}"
+        )
         for g, n_take in alloc.items():
             if n_take <= 0:
                 continue
@@ -358,7 +426,6 @@ def main():
         'dropped_mispronounced': dropped_mispron,
         'missing_audio': missing_audio,
         'duplicate_ids': dup_ids,
-        'duplicates_in_csv': dup_ids,
         'csv_files': len(csv_paths),
         'csv_files_valid': len(csv_valid),
         'csv_files_invalid': len(csv_invalid_details),
@@ -369,6 +436,12 @@ def main():
         'seed': int(args.seed),
         'exclude_mispronounced': bool(args.exclude_mispronounced),
         'drop_star_syllables': bool(args.drop_star_syllables),
+        'normalization_config': {
+            'umlaut_policy': 'map_to_v',      # ü/ǘ/ǚ/ǜ/ǖ and u: -> v
+            'keep_charset': '[a-z0-9 ]',      # ascii letters/digits/spaces
+            'tone_policy': 'digits_1_to_5',   # keep 1-5 tone digits
+            'drop_star_syllables': bool(args.drop_star_syllables),
+        },
         'relative_audio_path': bool(args.relative_audio_path),
         'speakers_total': len(speakers),
         'speakers_dev': len(dev_spks),
