@@ -238,12 +238,20 @@ Track 2 specific (aligned with Track 1 features):
 # Starred syllables handling
 --drop_star_syllables | --keep_star_syllables
 
+# Optional edge-case normalization
+--fix_split_tone                           # Merge split tones: "ki 53" -> "ki53"
+
 # Paths and diagnostics
 --audio_root HAT-Vol2                       # If audio lives outside data_root
 --relative_audio_path                       # Store audio paths relative to --audio_root
 --stats_out HAT-Vol2/manifests_track2/stats.json
 --dev_list_out HAT-Vol2/manifests_track2/dev_speakers.txt
 ```
+
+Note on starred syllables (Track 2):
+- By default, `--drop_star_syllables` removes starred/unpronounced syllables like `*ki53` / `ki53*`.
+- If you pass `--keep_star_syllables`, the syllable is kept but the `*` character itself is still removed by the whitelist; e.g., `*ki53` becomes `ki53`.
+- Tone diacritics such as `ˊ/ˇ/ˋ` (if present) are removed by the whitelist and do not affect SER.
 
 **Output Format:**
 ```json
