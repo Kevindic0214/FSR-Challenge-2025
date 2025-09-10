@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
 import torch
+import torch.nn.functional as F
 import soundfile as sf
 import librosa
 
@@ -55,7 +56,7 @@ class JsonlASRDataset(torch.utils.data.Dataset):
             apath = (self.audio_root / apath).resolve()
         wav, _sr = sf.read(str(apath))
         if _sr != SR:
-            wav = librosa.resample(wav, orig_sr=_sr, target_sr=SR)
+            wav = librosa.resample(wav, orig_sr=_sr, target_sr=SR, res_type="polyphase")
         if wav.ndim > 1:
             wav = wav.mean(axis=1)
         duration_sec = float(len(wav)) / float(SR)
@@ -141,6 +142,9 @@ def main():
                     help="Run evaluation every N steps when --eval_strategy=steps")
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--hardest_k", type=int, default=50, help="Top-K hardest samples to dump per evaluation")
+    ap.add_argument("--early_patience", type=int, default=2, help="Early stopping patience (eval steps or epochs)")
+    ap.add_argument("--repetition_penalty", type=float, default=1.05)
+    ap.add_argument("--no_repeat_ngram", type=int, default=3)
     # Diagnostics
     ap.add_argument("--grad_log_interval", type=int, default=100, help="log grad_norm every N steps")
     args = ap.parse_args()
@@ -148,10 +152,26 @@ def main():
     set_seed(int(args.seed))
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Sanity check: preprocessing normalization should match expectations to avoid SER drift
+    prep_report = args.train_jsonl.parent / "prepare_report.json"
+    if prep_report.exists():
+        try:
+            cfg = json.loads(prep_report.read_text(encoding="utf-8")).get("normalization_config", {})
+            # Expected defaults from prepare_hakka_track2.py
+            assert cfg.get("umlaut_policy") in ("map_to_v", "ü→v,u:→v"), f"Unexpected umlaut policy: {cfg}"
+            assert cfg.get("tone_policy", "").startswith("digits"), f"Unexpected tone policy: {cfg}"
+            # Ensure starred syllables were dropped (training expects removal rather than keeping as tokens)
+            if "drop_star_syllables" in cfg:
+                assert bool(cfg.get("drop_star_syllables")) is True, f"Unexpected drop_star_syllables: {cfg}"
+            print("[INFO] Normalization (from prepare):", cfg)
+        except Exception as e:
+            print("[WARN] Failed to parse prepare_report.json:", e)
+
     processor = WhisperProcessor.from_pretrained(args.base_model)
     tokenizer: WhisperTokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    model_pad_id = tokenizer.pad_token_id
 
     # Device and dtype detection
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -168,6 +188,12 @@ def main():
         torch_dtype=(torch.bfloat16 if use_bf16 else None),
         low_cpu_mem_usage=True,
     )
+    # 同步 pad_token_id 以避免解碼或計算損失時的 padding 不一致
+    try:
+        if getattr(model.config, "pad_token_id", None) is None or model.config.pad_token_id != model_pad_id:
+            model.config.pad_token_id = model_pad_id
+    except Exception:
+        pass
     # Align with Track1: Don't force clear suppress_tokens, only disable cache during training
     model.config.forced_decoder_ids = None
     model.config.use_cache = False  # Avoid cache during LoRA training
@@ -185,10 +211,18 @@ def main():
     except Exception:
         pass
 
-    # LoRA configuration (note that target_modules names align with Whisper)
+    # LoRA configuration (auto-detect present target modules)
+    wanted = {"q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"}
+    present = set()
+    for name, _ in model.named_modules():
+        leaf = name.split(".")[-1]
+        if leaf in wanted:
+            present.add(leaf)
+    target_modules = sorted(present) if present else sorted(list(wanted))
+    print("[INFO] LoRA target modules detected:", target_modules)
     lcfg = LoraConfig(
         r=int(args.lora_r), lora_alpha=int(args.lora_alpha), lora_dropout=float(args.lora_dropout),
-        target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
+        target_modules=target_modules,
         bias="none", task_type="SPEECH_SEQ_2_SEQ",
     )
     model = get_peft_model(model, lcfg)
@@ -204,7 +238,8 @@ def main():
         do_sample=False,
         num_beams=5,
         temperature=0.0,
-        no_repeat_ngram_size=3,
+        no_repeat_ngram_size=int(args.no_repeat_ngram),
+        repetition_penalty=float(args.repetition_penalty),
         length_penalty=1.0,
         max_new_tokens=256,
         # Keep model's default suppress_tokens
@@ -224,7 +259,10 @@ def main():
         gradient_accumulation_steps=int(args.grad_accum),
         learning_rate=float(args.lr),
         num_train_epochs=int(args.epochs),
-        warmup_steps=500,
+        # warmup_steps=500,
+        lr_scheduler_type="cosine",
+        warmup_ratio=0.05,
+        weight_decay=0.01,
         bf16=use_bf16,
         fp16=(not use_bf16 and device=="cuda"),
         max_grad_norm=1.0,
@@ -249,12 +287,27 @@ def main():
     class SERTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
             feats = inputs["input_features"].to(model.device, non_blocking=True)
+            labels = inputs["labels"].to(model.device, non_blocking=True)
             model_dtype = next(model.parameters()).dtype
             feats = feats.to(dtype=model_dtype)
-            labels = inputs["labels"].to(model.device, non_blocking=True)
-            outputs = model(input_features=feats, labels=labels)
-            loss = outputs.loss
-            return (loss, outputs) if return_outputs else loss
+
+            out = model(input_features=feats, labels=labels)
+            logits = out.logits  # [B, T, V]
+
+            # shift: predict label[t] from input[t-1]
+            logits = logits[:, :-1, :].contiguous()
+            target = labels[:, 1:].contiguous()
+
+            # safer dtype for smoothing
+            logits = logits.float()
+
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                target.view(-1),
+                ignore_index=-100,
+                label_smoothing=self.args.label_smoothing_factor,
+            )
+            return (loss, out) if return_outputs else loss
 
         def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix: str = "eval"):
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
@@ -270,6 +323,7 @@ def main():
                 collate_fn=self.data_collator,
                 num_workers=2,
                 pin_memory=True,
+                persistent_workers=True,
             )
             t0 = time.time()
             # reset GPU peak mem
@@ -483,6 +537,11 @@ def main():
         def __init__(self, early_stopping_patience=2, grad_log_interval=100):
             super().__init__(early_stopping_patience=early_stopping_patience)
             self.grad_log_interval = grad_log_interval
+            # 明確指定 EarlyStopping 監控指標與方向
+            self.early_stopping_patience = early_stopping_patience
+            self.early_stopping_threshold = 0.0
+            self.metric_to_track = "eval_ser"
+            self.greater_is_better = False
 
         def on_train_begin(self, args, state, control, **kwargs):
             trainer = getattr(self, 'trainer', None)
@@ -517,9 +576,25 @@ def main():
                 except Exception:
                     pass
 
-    trainer.add_callback(ExtraStatsCallback(early_stopping_patience=2, grad_log_interval=int(args.grad_log_interval)))
+    trainer.add_callback(ExtraStatsCallback(early_stopping_patience=int(args.early_patience),
+                                            grad_log_interval=int(args.grad_log_interval)))
 
     trainer.train()
+
+    # Save run configuration for reproducibility
+    try:
+        cfg_to_save = {
+            "cli_args": vars(args),
+            "hf_training_args": hf_args.to_dict(),
+            "gen_kwargs": gen_kwargs,
+            "lora": {"r": int(args.lora_r), "alpha": int(args.lora_alpha), "dropout": float(args.lora_dropout)},
+            "base_model": args.base_model,
+            "timestamp": int(time.time()),
+        }
+        (args.out_dir / "config.json").write_text(json.dumps(cfg_to_save, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
     # Only save LoRA parameters (small size, convenient for deployment)
     model.save_pretrained(args.out_dir)
     processor.save_pretrained(args.out_dir)
