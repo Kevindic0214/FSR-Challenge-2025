@@ -428,6 +428,8 @@ Create custom config for `run_track1_pipeline.py`:
 
 - **Dataset**: Official warm-up set (4299 utterances)
 - **Metric**: CER = 10.94%, Exact‑Match = 58.06%
+- **Model/Hparams**: base_model=`openai/whisper-large-v2`, LoRA r=16, α=32, lr=2e-4, epochs=3
+- **Decoding**: beams=5, temperature=0.0
 - **Evaluation**: `python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key --hyp predictions_track1.csv`
 - **Key-only artifacts**: aligned to official list (no extras)
   - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/pred_keyonly.csv`
@@ -435,6 +437,20 @@ Create custom config for `run_track1_pipeline.py`:
   - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/errors_keyonly.jsonl`
   - `results/track1/warmup/v2/R3_2_v2_r16a32_lr2e-4_e3/b5_t0.0/2025-09-08_1632/eval_keyonly.txt`
 - **Notes**: Coverage matched 4299/4299; extra 0 (pred‑only). CER/EM identical to full predictions.
+
+### Warm-up Results (Track 2)
+
+- **Dataset**: Official warm-up set (4299 utterances)
+- **Metric**: SER = 28.48%, Exact‑Match = 12.17%
+- **Model/Hparams**: base_model=`openai/whisper-large-v2`, LoRA r=16, α=32, lr=3e-4, epochs=3
+- **Decoding**: beams=5, temperature=0.0
+- **Evaluation**: `python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key --hyp predictions_track2_pinyin.csv`
+- **Key-only artifacts**: aligned to official list (no extras)
+  - `results/track2/warmup/v3t/R3_v3t_r16a32_lr3e-4_e3/b5_t0.0/2025-09-09_1547/pred_keyonly.csv`
+  - `results/track2/warmup/v3t/R3_v3t_r16a32_lr3e-4_e3/b5_t0.0/2025-09-09_1547/aligned_keyonly.csv`
+  - `results/track2/warmup/v3t/R3_v3t_r16a32_lr3e-4_e3/b5_t0.0/2025-09-09_1547/errors_keyonly.jsonl`
+  - `results/track2/warmup/v3t/R3_v3t_r16a32_lr3e-4_e3/b5_t0.0/2025-09-09_1547/eval_keyonly.txt`
+- **Notes**: Coverage matched 4299/4299; extra 0 (pred‑only). SER/EM identical to full predictions.
 
 ### Experiment Versions
 - **experiments_v2/**: Version 2 results with beam search comparisons
