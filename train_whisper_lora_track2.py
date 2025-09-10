@@ -22,14 +22,14 @@ from transformers import (
 from transformers.trainer_callback import EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model
 
-# ---- 建議：減少碎片化（可選，但有助穩定）----
+# ---- Suggestion: Reduce fragmentation (optional, but helps stability) ----
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# ---- 讓 4090 跑更穩 ----
+# ---- Make 4090 run more stable ----
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# ---------- 預設 I/O 路徑（可由 CLI 覆寫） ----------
+# ---------- Default I/O paths (can be overridden by CLI) ----------
 DEF_MANIFEST_DIR = Path("HAT-Vol2/manifests_track2")
 DEF_TRAIN_JSONL = DEF_MANIFEST_DIR / "train.jsonl"
 DEF_DEV_JSONL   = DEF_MANIFEST_DIR / "dev.jsonl"
@@ -38,7 +38,7 @@ DEF_OUT_DIR     = Path("exp_track2_whisper_large_lora")
 DEF_MODEL_NAME  = "openai/whisper-large-v2"
 SR = 16000
 
-# ---------- 資料集 ----------
+# ---------- Dataset ----------
 class JsonlASRDataset(torch.utils.data.Dataset):
     def __init__(self, jsonl_path: Path, processor: WhisperProcessor, audio_root: Optional[Path] = None):
         self.items = [json.loads(l) for l in jsonl_path.read_text(encoding="utf-8").splitlines()]
@@ -50,7 +50,7 @@ class JsonlASRDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int):
         ex = self.items[i]
-        apath = Path(ex.get("audio") or ex.get("path"))  # 相對或絕對
+        apath = Path(ex.get("audio") or ex.get("path"))  # relative or absolute
         if not apath.is_absolute() and self.audio_root is not None:
             apath = (self.audio_root / apath).resolve()
         wav, _sr = sf.read(str(apath))
@@ -63,7 +63,7 @@ class JsonlASRDataset(torch.utils.data.Dataset):
         inputs = self.processor.feature_extractor(
             wav, sampling_rate=SR, return_tensors="pt"
         )
-        # Track2: 與評估一致的標註正規化（僅保留 a-z0-9 與單一空白）
+        # Track2: Text normalization consistent with evaluation (keep only a-z0-9 and single spaces)
         raw_text = str(ex["text"]).lower()
         norm_text = re.sub(r'[^a-z0-9\s]', ' ', raw_text)
         norm_text = ' '.join(norm_text.split())
@@ -117,7 +117,7 @@ def ser_metric(preds: List[str], refs: List[str]) -> float:
         total_ref  += len(r)
     return 100.0 * total_edit / max(1, total_ref)
 
-# ---------- 主程式 ----------
+# ---------- Main program ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_jsonl", type=Path, default=DEF_TRAIN_JSONL)
@@ -153,7 +153,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 裝置與 dtype 偵測
+    # Device and dtype detection
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
@@ -162,16 +162,16 @@ def main():
     use_bf16 = bf16_ok
     print(f"[INFO] Device={device}, bf16={use_bf16}")
 
-    # 模型 & 記憶體優化
+    # Model & memory optimization
     model = WhisperForConditionalGeneration.from_pretrained(
         args.base_model,
         torch_dtype=(torch.bfloat16 if use_bf16 else None),
         low_cpu_mem_usage=True,
     )
-    # 與 Track1 對齊：不強制清空 suppress_tokens，僅在訓練時停用 cache
+    # Align with Track1: Don't force clear suppress_tokens, only disable cache during training
     model.config.forced_decoder_ids = None
-    model.config.use_cache = False  # LoRA 訓練時避免 cache
-    # 更穩定的梯度檢查點
+    model.config.use_cache = False  # Avoid cache during LoRA training
+    # More stable gradient checkpointing
     try:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     except Exception:
@@ -185,7 +185,7 @@ def main():
     except Exception:
         pass
 
-    # LoRA 設定（注意 target_modules 名稱對齊 Whisper）
+    # LoRA configuration (note that target_modules names align with Whisper)
     lcfg = LoraConfig(
         r=int(args.lora_r), lora_alpha=int(args.lora_alpha), lora_dropout=float(args.lora_dropout),
         target_modules=["q_proj","k_proj","v_proj","out_proj","fc1","fc2"],
@@ -193,13 +193,13 @@ def main():
     )
     model = get_peft_model(model, lcfg)
 
-    # 與 Track1 一致：保持模型的 suppress_tokens 預設，不額外覆寫
+    # Consistent with Track1: Keep model's default suppress_tokens, don't override
 
     train_ds = JsonlASRDataset(args.train_jsonl, processor, audio_root=args.audio_root)
     dev_ds   = JsonlASRDataset(args.dev_jsonl, processor, audio_root=args.audio_root)
     collator = DataCollator(processor)
 
-    # 解碼設定（對齊 Track1 的通用配置；不使用語言強制提示）
+    # Decoding configuration (aligned with Track1's common config; no language forcing prompt)
     gen_kwargs = dict(
         do_sample=False,
         num_beams=5,
@@ -207,13 +207,13 @@ def main():
         no_repeat_ngram_size=3,
         length_penalty=1.0,
         max_new_tokens=256,
-        # 保留模型預設 suppress_tokens
+        # Keep model's default suppress_tokens
         output_scores=False,
         return_dict_in_generate=False,
     )
 
-    # 訓練參數（為 24GB 卡調的值）
-    # 讓 save 與 eval 的節奏一致，避免 best model 在 step 發生但只在 epoch 儲存
+    # Training parameters (tuned for 24GB card)
+    # Keep save and eval rhythm consistent to avoid best model happening at steps but only saved at epochs
     _save_strategy = args.eval_strategy
     _save_steps = (args.eval_steps if args.eval_strategy == "steps" else None)
 
@@ -245,7 +245,7 @@ def main():
         dataloader_pin_memory=True,
     )
 
-    # 自定義 Trainer：保證把 input_features 傳進去（避免傳成 input_ids）
+    # Custom Trainer: Ensure input_features are passed in (avoid passing as input_ids)
     class SERTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
             feats = inputs["input_features"].to(model.device, non_blocking=True)
@@ -372,7 +372,7 @@ def main():
                     gr = [refs[i] for i in idx]
                     bucket_ser[name] = ser_metric(gp, gr)
 
-            # Asterisk sensitivity (與 Track1 對齊)
+            # Asterisk sensitivity (aligned with Track1)
             idx_has = [i for i, f in enumerate(has_ast_all) if f]
             idx_no = [i for i, f in enumerate(has_ast_all) if not f]
             ser_has = ser_metric([preds[i] for i in idx_has], [refs[i] for i in idx_has]) if idx_has else float('nan')
@@ -475,7 +475,7 @@ def main():
         data_collator=collator,
         train_dataset=train_ds,
         eval_dataset=dev_ds,
-        tokenizer=processor,  # 保存 processor（含 tokenizer + feature_extractor）
+        tokenizer=processor,  # Save processor (contains tokenizer + feature_extractor)
         compute_metrics=None,
     )
     
@@ -520,7 +520,7 @@ def main():
     trainer.add_callback(ExtraStatsCallback(early_stopping_patience=2, grad_log_interval=int(args.grad_log_interval)))
 
     trainer.train()
-    # 只存 LoRA 參數（體積小、部署方便）
+    # Only save LoRA parameters (small size, convenient for deployment)
     model.save_pretrained(args.out_dir)
     processor.save_pretrained(args.out_dir)
     print("[DONE] Training finished. Best adapter saved at", args.out_dir)
