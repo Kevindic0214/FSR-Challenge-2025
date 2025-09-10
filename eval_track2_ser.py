@@ -5,6 +5,12 @@ import os, csv, re, glob, argparse, unicodedata
 from collections import OrderedDict
 
 ZERO_WIDTH = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+# Normalization config aligned with Track 2 prepare/infer
+UMLAUTS = {
+    "ü": "v", "ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v",
+    "Ü": "v", "Ǖ": "v", "Ǘ": "v", "Ǚ": "v", "Ǜ": "v",
+}
+STAR_SYL_RE = re.compile(r"\s*(\*[a-z]+[0-9]+|[a-z]+[0-9]+\*)\s*", flags=re.I)
 
 # ---------------- helpers ----------------
 def tokenize_pinyin(raw: str, drop_star_tokens: bool = True):
@@ -18,14 +24,22 @@ def tokenize_pinyin(raw: str, drop_star_tokens: bool = True):
         return []
     raw = unicodedata.normalize("NFKC", raw)
     raw = ZERO_WIDTH.sub("", raw)
+    # unify ü-variants and u:/U: to v BEFORE lowercasing
+    tmp = []
+    for ch in raw:
+        tmp.append("v" if ch in UMLAUTS else ch)
+    raw = "".join(tmp)
+    raw = raw.replace("u:", "v").replace("U:", "v")
+    raw = raw.lower()
+    # drop starred syllables like *ki53 or ki53* from reference if requested
+    if drop_star_tokens:
+        raw = STAR_SYL_RE.sub(" ", raw)
     pieces = re.split(r"\s+", raw.strip())
     kept = []
     for p in pieces:
         if not p:
             continue
-        if drop_star_tokens and p.startswith("*"):
-            continue
-        p = p.lower()
+        # tokens are already lowercased; keep ascii letters/digits only
         p = re.sub(r"[^a-z0-9]", "", p)
         if p:
             kept.append(p)
