@@ -35,7 +35,7 @@ SR = 16000
 def load_wav(path: Path):
     wav, sr = sf.read(str(path))
     if sr != SR:
-        wav = librosa.resample(wav, orig_sr=sr, target_sr=SR)
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=SR, res_type="polyphase")
     if getattr(wav, "ndim", 1) > 1:
         wav = wav.mean(-1)
     # ensure float32 for feature extractor
@@ -171,8 +171,10 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--length_penalty", type=float, default=1.0)
     ap.add_argument("--max_new_tokens", type=int, default=256)
-    ap.add_argument("--no_repeat_ngram_size", type=int, default=0,
-                    help="Set >0 to avoid repeating n-grams; 0 to disable (matches training eval)")
+    ap.add_argument("--no_repeat_ngram_size", type=int, default=3,
+                    help="Avoid repeating n-grams; 3 與訓練一致")
+    ap.add_argument("--repetition_penalty", type=float, default=1.05,
+                    help="重複抑制（>1 會懲罰重複），建議 1.05")
     ap.add_argument("--batch", type=int, default=1, help="Batch size for decoding")
     # utility
     ap.add_argument("--limit", type=int, default=0, help="If >0, decode first N items only")
@@ -211,10 +213,8 @@ def main():
     )
     # Do NOT force zh; let LoRA guide pinyin output
     base.config.forced_decoder_ids = None
-    base.config.suppress_tokens = []
     if hasattr(base, "generation_config") and base.generation_config is not None:
         base.generation_config.forced_decoder_ids = None
-        base.generation_config.suppress_tokens = []
 
     if args.lora_dir and Path(args.lora_dir).exists():
         print(f"[INFO] Loading LoRA adapter: {args.lora_dir}")
@@ -225,6 +225,19 @@ def main():
         proc_from = args.model
 
     processor = WhisperProcessor.from_pretrained(proc_from)
+    # Align pad_token_id to avoid potential warnings
+    try:
+        tokenizer = processor.tokenizer
+        if getattr(model.config, "pad_token_id", None) is None:
+            model.config.pad_token_id = tokenizer.pad_token_id
+    except Exception:
+        pass
+
+    # Speed up decoding: enable KV cache during generation
+    try:
+        model.config.use_cache = True
+    except Exception:
+        pass
 
     model.to(device).eval()
     model_dtype = next(model.parameters()).dtype
@@ -291,8 +304,8 @@ def main():
                     temperature=float(args.temperature),
                     length_penalty=float(args.length_penalty),
                     max_new_tokens=int(args.max_new_tokens),
-                    suppress_tokens=None,
                     no_repeat_ngram_size=max(0, int(args.no_repeat_ngram_size)),
+                    repetition_penalty=float(args.repetition_penalty),
                     forced_decoder_ids=None,
                 )
             raw_texts = processor.batch_decode(pred_ids, skip_special_tokens=True)
