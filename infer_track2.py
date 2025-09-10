@@ -50,15 +50,31 @@ def load_wav(path: Path):
 def list_wavs(root_dir: Path) -> List[Path]:
     return sorted(Path(root_dir).rglob("*.wav"))
 
-# -------- Pinyin normalization (align with eval) --------
+# -------- Pinyin normalization (align with prepare/eval) --------
+UMLAUTS = {
+    "ü": "v", "ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v",
+    "Ü": "v", "Ǖ": "v", "Ǘ": "v", "Ǚ": "v", "Ǜ": "v",
+}
+STAR_SYL_RE = re.compile(r"\s*(\*[a-z]+[0-9]+|[a-z]+[0-9]+\*)\s*", flags=re.I)
 _ZW_RE = re.compile(r"[\u200B-\u200F\uFEFF]")
-def normalize_pinyin(text: str) -> str:
+_ALLOW_RE = re.compile(r"[^a-z0-9\s]")
+
+def normalize_pinyin(text: str, drop_star_syllables: bool = True) -> str:
     if not text:
         return ""
     t = unicodedata.normalize("NFKC", text)
     t = _ZW_RE.sub("", t)
+    # map umlauts and u:/U: to v BEFORE lowering
+    if t:
+        buf = []
+        for ch in t:
+            buf.append("v" if ch in UMLAUTS else ch)
+        t = "".join(buf)
+        t = t.replace("u:", "v").replace("U:", "v")
     t = t.lower()
-    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    if drop_star_syllables:
+        t = STAR_SYL_RE.sub(" ", t)
+    t = _ALLOW_RE.sub(" ", t)
     t = " ".join(t.split())
     return t
 
