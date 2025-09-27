@@ -30,7 +30,11 @@ import sys
 import re
 import unicodedata
 from pathlib import Path
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
+from collections import defaultdict
+import math
+import wave
+import contextlib
 
 # ---------- Optional OpenCC ----------
 _CC = None
@@ -159,6 +163,30 @@ def load_ref_from_manifest(jsonl_path: Path) -> Dict[str, str]:
             ref[key] = txt
     return ref
 
+def load_manifest_meta(jsonl_path: Path) -> Dict[str, Dict[str, Any]]:
+    """Load per-utterance metadata (utt_id -> {group,audio}).
+    Safe if fields are missing.
+    """
+    meta: Dict[str, Dict[str, Any]] = {}
+    with Path(jsonl_path).open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            ex = json.loads(line)
+            utt_id = (ex.get("utt_id") or "").strip()
+            if not utt_id:
+                audio = (ex.get("audio") or "").strip()
+                if audio:
+                    utt_id = Path(audio).stem
+                else:
+                    continue
+            key = utt_id if utt_id.endswith(".wav") else (utt_id + ".wav")
+            meta[key] = {
+                "group": (ex.get("group") or "").strip(),
+                "audio": (ex.get("audio") or "").strip(),
+            }
+    return meta
+
 def _read_csv_rows(path: Path) -> List[List[str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         rdr = csv.reader(f)
@@ -234,7 +262,8 @@ def profile_hyp(hyp: Dict[str,str], sample: int = 50):
 # ---------- Evaluation ----------
 def evaluate(ref: Dict[str,str], hyp: Dict[str,str],
              keep_asterisk: bool, strip_punct: bool,
-             dump_err: Optional[Path]=None, aligned_out: Optional[Path]=None):
+             dump_err: Optional[Path]=None, aligned_out: Optional[Path]=None,
+             per_utt_out: Optional[List[Dict[str, Any]]] = None):
     total_ref_chars = total_edits = exact = 0
     aligned_rows = []
     err_f = dump_err.open("w", encoding="utf-8") if dump_err else None
@@ -248,6 +277,16 @@ def evaluate(ref: Dict[str,str], hyp: Dict[str,str],
         total_ref_chars += len(r)
         total_edits += edits
         exact += int(r == h)
+        if per_utt_out is not None:
+            cer_utt = (edits/len(r)) if len(r) > 0 else (0.0 if len(h)==0 else 1.0)
+            per_utt_out.append({
+                "utt_id": uid,
+                "ref": r,
+                "hyp": h,
+                "ref_len": len(r),
+                "edits": edits,
+                "utt_cer": cer_utt,
+            })
         if aligned_out:
             cer_utt = (edits/len(r)) if len(r) > 0 else (0.0 if len(h)==0 else 1.0)
             aligned_rows.append([uid, r, h, len(r), edits, f"{cer_utt:.6f}"])
@@ -271,6 +310,155 @@ def evaluate(ref: Dict[str,str], hyp: Dict[str,str],
 def print_summary(tag: str, cer: float, em: float):
     print(f"[{tag}] CER = {cer:.4f} ({cer*100:.2f}%), EM = {em*100:.2f}%")
 
+# ---------- Length buckets and group-wise metrics ----------
+def _parse_edges(s: str, unit: str) -> List[float]:
+    try:
+        arr = [float(x) for x in s.split(",") if x.strip() != ""]
+    except Exception:
+        raise SystemExit(f"[ERROR] Could not parse --length_buckets: {s}")
+    arr = sorted(arr)
+    if math.isfinite(arr[-1]):
+        arr.append(float("inf"))
+    return arr
+
+def _bucket_index(v: float, edges: List[float]) -> int:
+    for i in range(len(edges)-1):
+        if edges[i] <= v < edges[i+1]:
+            return i
+    return len(edges)-2
+
+def _fmt_range(i: int, edges: List[float], unit: str) -> str:
+    a, b = edges[i], edges[i+1]
+    if not math.isfinite(b):
+        return f"{int(a)}+{('s' if unit=='seconds' else '')}"
+    if unit == 'seconds':
+        return f"{a:g}–{b:g}s"
+    else:
+        return f"{int(a)}–{int(b-1)}"
+
+def _wav_duration_seconds(path: Path) -> Optional[float]:
+    try:
+        with contextlib.closing(wave.open(str(path), 'rb')) as wf:
+            fr = wf.getframerate(); n = wf.getnframes()
+            if fr > 0:
+                return n / float(fr)
+    except Exception:
+        return None
+    return None
+
+def summarize_buckets_and_groups(per_utt: List[Dict[str, Any]],
+                                 meta: Dict[str, Dict[str, Any]],
+                                 *,
+                                 bucket_unit: str = 'chars',
+                                 bucket_edges: List[float] = (0,10,20,40,80,float('inf')),
+                                 audio_root: Optional[Path] = None,
+                                 plot_prefix: Optional[Path] = None,
+                                 dump_bucket_csv: Optional[Path] = None,
+                                 dump_group_csv: Optional[Path] = None):
+    # Join metadata
+    for rec in per_utt:
+        m = meta.get(rec["utt_id"], {})
+        rec["group"] = m.get("group", "") or "UNK"
+        rec["audio"] = m.get("audio", "")
+
+    # Compute duration if needed and possible
+    if bucket_unit == 'seconds':
+        for rec in per_utt:
+            dur = None
+            a = rec.get("audio")
+            if a:
+                p = Path(a)
+                if not p.is_absolute() and audio_root is not None:
+                    p = audio_root / p
+                dur = _wav_duration_seconds(p)
+            rec["duration_sec"] = dur
+
+    # Aggregation helpers
+    def agg(rows: List[Dict[str, Any]]):
+        ref_sum = sum(r["ref_len"] for r in rows)
+        edit_sum = sum(r["edits"] for r in rows)
+        exact = sum(1 for r in rows if r["edits"] == 0)
+        cer = (edit_sum / ref_sum) if ref_sum > 0 else 0.0
+        em = (exact / len(rows)) if rows else 0.0
+        return cer, em, len(rows)
+
+    # Buckets
+    bins = list(bucket_edges)
+    bucket_rows: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in per_utt:
+        if bucket_unit == 'seconds':
+            v = r.get("duration_sec")
+            if v is None:
+                continue
+        else:
+            v = float(r["ref_len"])  # characters
+        idx = _bucket_index(v, bins)
+        bucket_rows[idx].append(r)
+
+    bucket_stats: List[Tuple[str, float, float, int]] = []  # (label, CER, EM, N)
+    for i in range(len(bins)-1):
+        rows = bucket_rows.get(i, [])
+        cer, em, n = agg(rows)
+        bucket_stats.append((_fmt_range(i, bins, bucket_unit), cer, em, n))
+
+    # Groups
+    group_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in per_utt:
+        group_rows[r.get("group", "UNK")].append(r)
+    group_stats: List[Tuple[str, float, float, int]] = []
+    for g in sorted(group_rows.keys()):
+        cer, em, n = agg(group_rows[g])
+        group_stats.append((g, cer, em, n))
+
+    # Print
+    print("[BUCKET] unit=", bucket_unit)
+    for lab, cer, em, n in bucket_stats:
+        print(f"  {lab:>10s} : CER={cer*100:6.2f}% EM={em*100:6.2f}% N={n}")
+    print("[GROUP]")
+    for g, cer, em, n in group_stats:
+        print(f"  {g:>3s} : CER={cer*100:6.2f}% EM={em*100:6.2f}% N={n}")
+
+    # CSV dumps
+    if dump_bucket_csv:
+        dump_bucket_csv.parent.mkdir(parents=True, exist_ok=True)
+        with dump_bucket_csv.open('w', encoding='utf-8', newline='') as f:
+            w = csv.writer(f); w.writerow(["bucket","cer","em","n"])
+            for lab, cer, em, n in bucket_stats:
+                w.writerow([lab, f"{cer:.6f}", f"{em:.6f}", n])
+    if dump_group_csv:
+        dump_group_csv.parent.mkdir(parents=True, exist_ok=True)
+        with dump_group_csv.open('w', encoding='utf-8', newline='') as f:
+            w = csv.writer(f); w.writerow(["group","cer","em","n"])
+            for g, cer, em, n in group_stats:
+                w.writerow([g, f"{cer:.6f}", f"{em:.6f}", n])
+
+    # Optional plots
+    if plot_prefix:
+        try:
+            import matplotlib.pyplot as plt
+            # Buckets plot (CER)
+            labels = [b[0] for b in bucket_stats]
+            vals = [b[1]*100 for b in bucket_stats]
+            plt.figure(figsize=(4.0,2.2), dpi=150)
+            plt.bar(range(len(vals)), vals, color="#4C78A8")
+            plt.xticks(range(len(labels)), labels, rotation=45, ha='right')
+            plt.ylabel('CER %'); plt.tight_layout()
+            outp = Path(str(plot_prefix) + "_buckets.png")
+            plt.savefig(outp); plt.close()
+            print(f"[PLOT] Saved {outp}")
+            # Groups plot (CER)
+            glabels = [g[0] for g in group_stats]
+            gvals = [g[1]*100 for g in group_stats]
+            plt.figure(figsize=(3.2,2.2), dpi=150)
+            plt.bar(range(len(gvals)), gvals, color="#F58518")
+            plt.xticks(range(len(glabels)), glabels)
+            plt.ylabel('CER %'); plt.tight_layout()
+            outp = Path(str(plot_prefix) + "_groups.png")
+            plt.savefig(outp); plt.close()
+            print(f"[PLOT] Saved {outp}")
+        except Exception as e:
+            print(f"[WARN] matplotlib not available or plotting failed: {e}")
+
 # ---------- Main ----------
 def main():
     ap = argparse.ArgumentParser(description="Evaluate Track1 CER (Hanzi) with variant probing")
@@ -290,6 +478,20 @@ def main():
     # Outputs
     ap.add_argument("--dump_err", type=str, default=None, help="Per-utterance mismatch JSONL")
     ap.add_argument("--aligned_out", type=str, default=None, help="Aligned CSV (ref/hyp/cer per utt)")
+    # Buckets / groups (optional)
+    ap.add_argument("--manifest_meta", type=str, default=None,
+                    help="Optional manifest JSONL with fields {utt_id,audio,group} for bucket/group analysis")
+    ap.add_argument("--audio_root", type=str, default=None,
+                    help="If manifest 'audio' is relative, join with this root to read wav duration")
+    ap.add_argument("--bucket_unit", choices=["chars","seconds"], default="chars",
+                    help="Bucket by reference length (chars) or audio duration (seconds)")
+    ap.add_argument("--length_buckets", type=str, default="0,10,20,40,80",
+                    help="Comma-separated bucket edges (last open-ended); default for chars")
+    ap.add_argument("--sec_buckets", type=str, default="0,4.8,12.4,20,60",
+                    help="Comma-separated second edges used when --bucket_unit=seconds")
+    ap.add_argument("--dump_bucket_csv", type=str, default=None, help="Write per-bucket stats CSV")
+    ap.add_argument("--dump_group_csv", type=str, default=None, help="Write per-group stats CSV")
+    ap.add_argument("--plot_prefix", type=str, default=None, help="If set, save bucket/group CER bar charts with this prefix")
     args = ap.parse_args()
 
     # Load reference
@@ -334,9 +536,41 @@ def main():
     aligned_out = Path(args.aligned_out) if args.aligned_out else None
 
     # AS-IS
+    per_utt: List[Dict[str, Any]] = []
     cer, em = evaluate(ref_map, hyp_map, keep_asterisk=keep_ast, strip_punct=args.strip_punct,
-                       dump_err=dump_err, aligned_out=aligned_out)
+                       dump_err=dump_err, aligned_out=aligned_out, per_utt_out=per_utt)
     print_summary("AS-IS", cer, em)
+
+    # Optional bucket/group analysis
+    meta: Dict[str, Dict[str, Any]] = {}
+    if args.manifest_meta:
+        meta = load_manifest_meta(Path(args.manifest_meta))
+    elif args.ref:
+        # If ref is a manifest, reuse it as meta when available
+        try:
+            meta = load_manifest_meta(Path(args.ref))
+        except Exception:
+            meta = {}
+    if meta and per_utt:
+        bucket_unit = args.bucket_unit
+        edges_str = args.sec_buckets if bucket_unit == 'seconds' else args.length_buckets
+        edges = _parse_edges(edges_str, bucket_unit)
+        audio_root = Path(args.audio_root) if args.audio_root else None
+        plot_prefix = Path(args.plot_prefix) if args.plot_prefix else None
+        dump_bucket_csv = Path(args.dump_bucket_csv) if args.dump_bucket_csv else None
+        dump_group_csv = Path(args.dump_group_csv) if args.dump_group_csv else None
+        summarize_buckets_and_groups(
+            per_utt, meta,
+            bucket_unit=bucket_unit,
+            bucket_edges=edges,
+            audio_root=audio_root,
+            plot_prefix=plot_prefix,
+            dump_bucket_csv=dump_bucket_csv,
+            dump_group_csv=dump_group_csv,
+        )
+    else:
+        if args.bucket_unit == 'seconds' or args.plot_prefix or args.dump_bucket_csv or args.dump_group_csv:
+            print("[WARN] Bucket/group analysis skipped (no manifest meta provided). Use --manifest_meta or --ref (manifest mode).")
 
     # Variant probe (unify both sides)
     if args.probe_variants:
