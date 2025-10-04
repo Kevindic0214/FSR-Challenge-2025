@@ -9,7 +9,6 @@ exp_track2_whisper_large_lora/
 experiments_v2/
 experiments_v3t/
 ROCLING-2025-Template/
-ROCLING-2025-Submission/
 runs/
 *.csv
 *.txt
