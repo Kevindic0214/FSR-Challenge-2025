@@ -1,0 +1,296 @@
+%
+% ROCLING 2025 – Anonymous Review Version (English)
+%
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[hyperref]{rocling2025}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage{microtype}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{graphicx}
+% Vector charts rendered by LaTeX (no external plotting needed)
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+% Enable CJK characters in examples (XeLaTeX)
+\usepackage{fontspec}
+\usepackage{xeCJK}
+% Prefer TC; fallback to JP. Also set sans/mono families for consistency.
+\IfFontExistsTF{Noto Serif CJK TC}{%
+  \setCJKmainfont[BoldFont={Noto Serif CJK TC Bold}]{Noto Serif CJK TC}%
+}{%
+  \setCJKmainfont[BoldFont={Noto Serif CJK JP Bold}]{Noto Serif CJK JP}%
+}
+\IfFontExistsTF{Noto Sans CJK TC}{%
+  \setCJKsansfont[BoldFont={Noto Sans CJK TC Bold}]{Noto Sans CJK TC}%
+}{%
+  \setCJKsansfont[BoldFont={Noto Sans CJK JP Bold}]{Noto Sans CJK JP}%
+}
+\IfFontExistsTF{Noto Sans Mono CJK TC}{\setCJKmonofont{Noto Sans Mono CJK TC}}{%
+  \IfFontExistsTF{Noto Sans Mono CJK JP}{\setCJKmonofont{Noto Sans Mono CJK JP}}{\setCJKmonofont{Noto Sans CJK JP}}}
+\renewcommand{\UrlFont}{\ttfamily\small}
+
+% Hide the review banner ("Confidential Review Copy") while keeping line numbers.
+% The ROCLING style prints \confidential on each page in review mode.
+% Override it to empty to match the sample PDF formatting.
+\makeatletter
+\def\confidential{}
+\makeatother
+
+% Review version: keep \roclingfinalcopy commented to show the ruler (line numbers)
+% \roclingfinalcopy
+
+\newcommand\BibTeX{B\textsc{ib}\TeX}
+
+\title{A Compact Whisper+LoRA Baseline for Taiwanese Hakka ASR in FSR-2025}
+
+% Anonymous for double-blind review
+\author{Anonymous}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a compact baseline for the Formosa Speech Recognition (FSR-2025) Taiwanese Hakka ASR challenge.\
+Our system fine-tunes \emph{Whisper-large-v2} (Track~1) and \emph{Whisper-large-v3-turbo} (Track~2) \citep{radford2022whisper} with LoRA \citep{hu2021lora}, under a consistent normalization policy and balanced speaker-based dev splits.\
+On the official warm-up set, we obtain 10.94\% CER for Track~1 (Hanzi) and 28.48\% SER for Track~2 (Pinyin).\
+We provide simple, reproducible pipelines covering data preparation, training, inference, and evaluation, without using external data or language models.
+\end{abstract}
+
+\begin{keywords}
+Automatic speech recognition; Hakka; Whisper; LoRA; low-resource; FSR-2025; CER; SER
+\end{keywords}
+
+\section{Introduction}
+Taiwanese Hakka is a low-resource language variant of significant cultural value.\
+FSR-2025 defines two tracks: Track~1 evaluates character error rate (CER) on Hanzi, and Track~2 evaluates syllable error rate (SER) on Pinyin.\
+We aim to provide a strong, minimal-requirement baseline using \emph{Whisper-large-v2} (Track~1) and \emph{Whisper-large-v3-turbo} (Track~2) fine-tuned with low-rank adaptation (LoRA), emphasizing practical engineering choices and reproducibility over model complexity.\
+In this work, we follow the official specification of the FSR-2025 challenge \citep{fsr2025}.
+
+\paragraph{Contributions.} (i) A reproducible baseline for both tracks with unified normalization that matches evaluation; (ii) a simple LoRA recipe runnable on a single 24~GB GPU with balanced speaker-based dev split; (iii) competitive warm-up results with lightweight error and length-bucket analyses.
+
+\section{Task and Data}
+We train on the HAT-Vol2 corpus (\textasciitilde60 hours; Dapu and Zhao'an dialects; 16~kHz mono) and evaluate on the FSR-2025 warm-up set (\textasciitilde10 hours; 4{,}299 utterances total).\
+We build manifests via dedicated scripts for each track, apply Unicode NFKC normalization, remove zero-width characters, and adopt track-specific text processing: Hanzi cleaning for Track~1 and Pinyin digit-tone policy for Track~2.\
+Dev speakers are selected in a balanced way across DF/DM/ZF/ZM groups for stable validation.\\
+We rely on the HAT-Vol2 dataset \citep{hatvol2} and the official warm-up set \citep{fsr2025} for training and evaluation.
+
+\paragraph{Normalization policy.} Track~1 (Hanzi): apply NFKC, remove zero-width characters, map mixed punctuation to Chinese forms, and strip spaces to align with evaluation. Track~2 (Pinyin): apply NFKC, remove zero-width characters, map ü/ǘ/\dots{} and ``u:/U:'' to ``v'', keep only [a--z0--9] and single spaces, and by default drop starred syllables (e.g., ``*ki53'' or ``ki53*''); an optional fix merges split-tone forms (e.g., ``ki 53'' $\rightarrow$ ``ki53'').
+
+\begin{table}[t]
+\centering
+\small
+% Use ragged2e + tabularx: fixed widths for first two cols,
+% flexible X for notes; avoids overfull/underfull issues and looks tidy.
+\caption{Dataset overview and evaluation split.}
+\label{tab:data}
+\begin{tabularx}{\linewidth}{@{}>{\RaggedRight\arraybackslash}p{0.30\linewidth} >{\centering\arraybackslash}p{0.18\linewidth} >{\RaggedRight\arraybackslash}X@{}}
+\hline
+\textbf{Split} & \textbf{Size} & \textbf{Notes} \\
+\hline
+HAT-Vol2 (train) & \(\sim\)60 h & Dapu/Zhao'an; 16~kHz mono \\
+Warm-up (eval) & \(\sim\)10 h / 4,299~utt & Official FSR-2025 set \\
+Dev speakers & 12 (balanced) & DF/DM/ZF/ZM allocation \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Related Work}
+Low-resource ASR has been explored in multilingual programs such as Babel \citep{harper2014babel}. Whisper \citep{radford2022whisper} is a strong multilingual recognizer; we adapt it to Hakka via parameter-efficient fine-tuning. LoRA \citep{hu2021lora} reduces trainable parameters for seq2seq models while retaining quality, enabling practical fine-tuning on 24~GB GPUs.
+
+\section{Approach}
+We fine-tune \emph{Whisper-large-v2} (Track~1) and \emph{Whisper-large-v3-turbo} (Track~2) \citep{radford2022whisper} with LoRA \citep{hu2021lora} (rank~16, $\alpha$=32, dropout~0.05).\
+Training uses gradient checkpointing, bf16 when available, and label smoothing.\
+For Track~1 decoding, we force Chinese transcription via the decoder prompt; Track~2 uses language-appropriate decoding without language forcing.\
+Beam search with 5 beams and temperature 0.0 is used unless specified.\\
+Implementation details: we apply LoRA adapters to attention and MLP modules (\texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{out\_proj}, \texttt{fc1}, \texttt{fc2}); enable TF32 for faster, stable training on recent GPUs; and use label smoothing of 0.1.
+
+We keep Whisper's default suppression behavior (do not forcibly clear \texttt{suppress\_tokens}), disable the generation cache during training, and enable early stopping on the dev metric (patience~2). bf16 is automatically used when supported; otherwise fp16 on GPU.
+
+\paragraph{Implementation.} We implement training and inference with HuggingFace Transformers and PEFT on PyTorch. Base models: \texttt{openai/whisper-large-v2} (Track~1) and \texttt{openai/whisper-large-v3-turbo} (Track~2). Audio I/O uses \texttt{torchaudio} for Track~1 and \texttt{soundfile}+\texttt{librosa} for Track~2. Manifests are JSONL with fields \{\texttt{utt\_id}, \texttt{audio}, \texttt{text}/\texttt{hanzi}/\texttt{pinyin}, \texttt{group}\}; relative audio paths are resolved via a root flag. During training we enable gradient checkpointing (non-reentrant when available), set \texttt{use\_cache}=False, and turn on TF32. Decoding uses \texttt{num\_beams}=5, \texttt{temperature}=0.0, \texttt{no\_repeat\_ngram\_size}=3, \texttt{length\_penalty}=1.0, and \texttt{max\_new\_tokens}=256; we force a Chinese decoder prompt only for Track~1. We log CER/SER, exact match, group/length-bucket scores, 3-gram repetition rate, throughput, and peak memory; training uses AdamW with a linear schedule and 500 warmup steps, and we save only the LoRA adapter and processor for lightweight deployment.
+
+\section{Experiments}
+We train for 3 epochs with per-device batch size 2 and gradient accumulation 16 on an RTX~4090 (24~GB).\
+Evaluation metrics are CER (Track~1) and SER (Track~2) with sentence-level exact match for reference. We use seed 1337, learning rate $1\times 10^{-4}$ for \emph{large-v2} (Track~1) and $3\times 10^{-4}$ for \emph{large-v3-turbo} (Track~2), with 500 warmup steps, label smoothing 0.1, gradient checkpointing, TF32, and early stopping (patience~2). The HuggingFace Trainer default optimizer (AdamW) is used.
+
+\section{Results}
+On the warm-up set: Track~1 reaches 10.94\% CER with 58.06\% exact match; Track~2 reaches 28.48\% SER with 12.17\% exact match.\
+These numbers are obtained with the shared pipelines (\emph{large-v2} for Track~1 and \emph{large-v3-turbo} for Track~2) and no external data beyond the provided corpora.\
+We observe stable validation under balanced speaker splits and consistent normalization. Longer utterances show mildly higher error rates (notably in the 12.4--20~s bucket), and we observe small variations across DF/DM/ZF/ZM groups under the balanced-split protocol.
+
+\begin{table}[h]
+\centering
+\caption{Warm-up evaluation results. EM: exact match.}
+\label{tab:results}
+% Use tabularx so the value column can expand gracefully
+\begin{tabularx}{\linewidth}{@{}l c >{\raggedleft\arraybackslash}X@{}}
+\hline
+\textbf{Track} & \textbf{Metric} & \textbf{Score} \\
+\hline
+Track 1 (Hanzi) & CER / EM & 10.94\% / 58.06\% \\
+Track 2 (Pinyin) & SER / EM & 28.48\% / 12.17\% \\
+\hline
+\end{tabularx}
+\end{table}
+
+% Reproducibility section omitted in review version to preserve anonymity
+
+\paragraph{Final-test results.} On the official final-test, our system achieves 18.78\% CER for Track~1 and 33.38\% SER for Track~2. For analysis, we also report a tone-removed Pinyin WER of 21.30\%. Figures~\ref{fig:finaltest-cer} and~\ref{fig:finaltest-wer} show the organizer-provided charts. In our social group, our CER ranking is \textbf{2/3} (Track~1), and our tone-removed Pinyin WER ranking is \textbf{2/2} among teams with available data (Track~2).
+
+\paragraph{Length buckets and groups.} We further report Track~1 warm-up CER by utterance length and by speaker groups. Length buckets follow the official seconds-based bins (0--4.8/4.8--12.4/12.4--20~s). Figures~\ref{fig:len-buckets} and~\ref{fig:group-cer} summarize the results.
+
+\paragraph{Track 2 buckets and groups.} For Track~2 (Pinyin), we report SER by syllable length buckets and by groups in Figures~\ref{fig:t2-len-buckets} and~\ref{fig:t2-group-ser}.
+
+\begin{table}[h]
+\centering
+\caption{Official final-test scores (values only; charts and rankings omitted for review).}
+\label{tab:finaltest-anon}
+% Use tabularx to keep numbers tidy within the column width
+\begin{tabularx}{\linewidth}{@{}l c >{\raggedleft\arraybackslash}X@{}}
+\hline
+\textbf{Track} & \textbf{Metric} & \textbf{Final-test} \\
+\hline
+1 (Hanzi) & CER & 18.78\% \\
+2 (Pinyin) & SER & 33.38\% \\
+2 (Pinyin) & WER (tone-removed) & 21.30\% \\
+\hline
+\end{tabularx}
+\end{table}
+
+% ---- Length buckets (seconds) plotted from CSV ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.98\linewidth,
+    height=4.0cm,
+    ybar,
+    ymin=0,
+    ylabel={CER (\%)},
+    symbolic x coords={0–4.8s,4.8–12.4s,12.4–20s,20–60s,60+s},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=10pt,
+    grid=both,
+    tick label style={/pgf/number format/fixed},
+  ]
+    % cer is in [0,1]; multiply by 100 in y expr
+    \addplot table [x=bucket, y expr=\thisrow{cer}*100, col sep=comma] {analysis/track1_buckets_sec.csv};
+  \end{axis}
+\end{tikzpicture}
+\caption{Track~1 warm-up CER by utterance duration.}
+\label{fig:len-buckets}
+\end{figure}
+
+% ---- Group-wise CER plotted from CSV ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.98\linewidth,
+    height=4.0cm,
+    ybar,
+    ymin=0,
+    ylabel={CER (\%)},
+    symbolic x coords={DF,DM,ZF,ZM,MED-DP,MED-ZA},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=9pt,
+    grid=both,
+  ]
+    \addplot table [x=group, y expr=\thisrow{cer}*100, col sep=comma] {analysis/track1_groups.csv};
+  \end{axis}
+\end{tikzpicture}
+\caption{Track~1 warm-up CER by group (recorded DF/DM/ZF/ZM and media subsets).}
+\label{fig:group-cer}
+\end{figure}
+
+% ---- Track 2: tokens-length buckets (SER) ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.98\linewidth,
+    height=4.0cm,
+    ybar,
+    ymin=0,
+    ylabel={SER (\%)},
+    symbolic x coords={0–9,10–19,20–39,40–79,80+},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=10pt,
+    grid=both,
+    tick label style={/pgf/number format/fixed},
+  ]
+    \addplot table [x=bucket, y expr=\thisrow{ser}*100, col sep=comma] {analysis/track2_buckets_tok.csv};
+  \end{axis}
+\end{tikzpicture}
+\caption{Track~2 warm-up SER by syllable length (tokens).}
+\label{fig:t2-len-buckets}
+\end{figure}
+
+% ---- Track 2: group-wise SER ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.98\linewidth,
+    height=4.0cm,
+    ybar,
+    ymin=0,
+    ylabel={SER (\%)},
+    symbolic x coords={DF,DM,ZF,ZM,MED-DP,MED-ZA},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=9pt,
+    grid=both,
+  ]
+    \addplot table [x=group, y expr=\thisrow{ser}*100, col sep=comma] {analysis/track2_groups.csv};
+  \end{axis}
+\end{tikzpicture}
+\caption{Track~2 warm-up SER by group (recorded DF/DM/ZF/ZM and media subsets).}
+\label{fig:t2-group-ser}
+\end{figure}
+
+% Official charts from the organizers (for completeness in the anonymous version).
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{final-test-results/cer-results.png}
+\caption{Official final-test chart: CER (Track~1).}
+\label{fig:finaltest-cer}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{final-test-results/wer-results.png}
+\caption{Official final-test chart: tone-removed WER/SER (Track~2).}
+\label{fig:finaltest-wer}
+\end{figure}
+
+
+
+\section{Error Analysis}
+Common errors include character/phonetic substitutions and occasional short repeats; we monitor n-gram repetition to detect degeneration.\
+Performance degrades mildly for longer utterances; bucketed analysis suggests length-aware decoding or better segmenting could help.
+
+\paragraph{Examples.} Sampled warm-up mismatches:\\
+\emph{(003jh5p8hd.wav)} ref: 大家攏無仰子\textbf{嗬}隨拁你\textbf{人救}出去； hyp: 大家攏無仰子\textbf{項}隨拁你\textbf{研究}出去。\\
+\emph{(03qw9gfad7.wav)} ref: 食\textbf{著幾}隻草蜢\textbf{乜好}啊； hyp: 食\textbf{到佢}隻草蜢\textbf{毋會好}啊。\\
+
+These illustrate homophone/near-neighbor substitutions and local phrase alterations; stronger language modeling or constrained decoding may mitigate such errors. For Pinyin (Track~2), common patterns include tone-digit confusions and occasional effects from star-syllable handling; our normalization reduces such artifacts.
+
+\section*{Limitations}
+Our results are based on the provided HAT-Vol2 training data and the official warm-up set. We do not explore external language models or data augmentation; Pinyin normalization choices (e.g., starred syllables) can affect SER.
+
+\section{Conclusion}
+We provide a concise, reproducible baseline for both tracks of FSR-2025 Hakka ASR using Whisper+LoRA.\
+Future work includes dialect-aware adaptation, LM-rescoring for Hanzi, refined Pinyin normalization, and temperature/beam tuning.
+
+\bibliographystyle{acl_natbib}
+\bibliography{refs}
+
+\end{document}

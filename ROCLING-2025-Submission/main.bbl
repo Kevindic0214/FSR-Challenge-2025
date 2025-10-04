@@ -1,0 +1,30 @@
+\begin{thebibliography}{4}
+\expandafter\ifx\csname natexlab\endcsname\relax\def\natexlab#1{#1}\fi
+
+\bibitem[{hat(2024)}]{hatvol2}
+ 2024.
+\newblock Hat-vol2: Taiwanese hakka speech corpus.
+\newblock Dataset.
+\newblock \textasciitilde60 hours; Dapu and Zhao'an dialects; 16 kHz mono.
+
+\bibitem[{fsr(2025)}]{fsr2025}
+ 2025.
+\newblock Formosa speech recognition challenge 2025: Hakka asr.
+\newblock Challenge.
+\newblock Warm-up evaluation set and official task description.
+
+\bibitem[{Hu et~al.(2021)Hu, Shen, Wallis, Allen-Zhu, Li, Wang, and
+  Chen}]{hu2021lora}
+Edward~J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li,
+  Lu~Wang, and Weizhu Chen. 2021.
+\newblock Lora: Low-rank adaptation of large language models.
+\newblock \emph{arXiv preprint arXiv:2106.09685}.
+
+\bibitem[{Radford et~al.(2022)Radford, Kim, Xu, Brockman, McLeavey, and
+  Sutskever}]{radford2022whisper}
+Alec Radford, Jong~Wook Kim, Tao Xu, Greg Brockman, Christine McLeavey, and
+  Ilya Sutskever. 2022.
+\newblock Robust speech recognition via large-scale weak supervision.
+\newblock \emph{arXiv preprint arXiv:2212.04356}.
+
+\end{thebibliography}

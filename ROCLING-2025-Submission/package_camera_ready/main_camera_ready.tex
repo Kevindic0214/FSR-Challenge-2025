@@ -1,0 +1,154 @@
+%
+% ROCLING 2025 – Camera-Ready Version (English)
+%
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[hyperref]{rocling2025}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage{microtype}
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\small,breaklines=true,breakatwhitespace=true,columns=fullflexible}
+\renewcommand{\UrlFont}{\ttfamily\small}
+
+% Camera-ready: uncomment to remove ruler and set final formatting
+\roclingfinalcopy
+
+\newcommand\BibTeX{B\textsc{ib}\TeX}
+
+\title{A Compact Whisper+LoRA Baseline for Taiwanese Hakka ASR in FSR-2025}
+
+\author{Hung-Ting Hsieh\\
+  Independent Researcher\\
+  \texttt{hsiehk0214@gmail.com}}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a compact baseline for the Formosa Speech Recognition (FSR-2025) Taiwanese Hakka ASR challenge.\
+Our system fine-tunes \emph{Whisper-large-v2} \citep{radford2022whisper} with LoRA \citep{hu2021lora}, using consistent text normalization and balanced dev splits.\
+On the official warm-up set, we obtain 10.94\% CER for Track~1 (Hanzi) and 28.48\% SER for Track~2 (Pinyin).\
+We provide simple yet reproducible pipelines covering data preparation, training, inference, and evaluation.\
+Code is available at \href{https://github.com/Kevindic0214/FSR-Challenge-2025}{github.com/Kevindic0214/FSR-Challenge-2025}.
+\end{abstract}
+
+\begin{keywords}
+Automatic speech recognition; Hakka; Whisper; LoRA; CER; SER
+\end{keywords}
+
+\section{Introduction}
+Taiwanese Hakka is a low-resource language variant of significant cultural value.\
+FSR-2025 defines two tracks: Track~1 evaluates character error rate (CER) on Hanzi, and Track~2 evaluates syllable error rate (SER) on Pinyin.\
+We aim to provide a strong, minimal-requirement baseline using \emph{Whisper-large-v2} fine-tuned with low-rank adaptation (LoRA), emphasizing practical engineering choices and reproducibility over model complexity.\\
+In this work, we follow the official specification of the FSR-2025 challenge \citep{fsr2025}.
+
+\section{Task and Data}
+We train on the HAT-Vol2 corpus (\textasciitilde60 hours; Dapu and Zhao'an dialects; 16~kHz mono) and evaluate on the FSR-2025 warm-up set (\textasciitilde10 hours; 4{,}299 utterances total).\
+We build manifests via dedicated scripts for each track, apply Unicode NFKC normalization, remove zero-width characters, and adopt track-specific text processing: Hanzi cleaning for Track~1 and Pinyin digit-tone policy for Track~2.\
+Dev speakers are selected in a balanced way across DF/DM/ZF/ZM groups for stable validation.\\
+We rely on the HAT-Vol2 dataset \citep{hatvol2} and the official warm-up set \citep{fsr2025} for training and evaluation.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcl}
+\hline
+\textbf{Split} & \textbf{Size} & \textbf{Notes} \\
+\hline
+HAT-Vol2 (train) & \(\sim\)60 h & Dapu/Zhao'an; 16 kHz mono \\
+Warm-up (eval) & \(\sim\)10 h / 4,299 utt & Official FSR-2025 set \\
+Dev speakers & 12 (balanced) & DF/DM/ZF/ZM allocation \\
+\hline
+\end{tabular}
+\caption{Dataset overview and evaluation split.}
+\label{tab:data}
+\end{table}
+
+\section{Related Work}
+Low-resource ASR has been explored in multilingual programs such as Babel \citep{harper2014babel}. Whisper \citep{radford2022whisper} is a strong multilingual recognizer; we adapt it to Hakka via parameter-efficient fine-tuning. LoRA \citep{hu2021lora} reduces trainable parameters for seq2seq models while retaining quality, enabling practical fine-tuning on 24~GB GPUs.
+
+\section{Approach}
+We fine-tune \emph{Whisper-large-v2} \citep{radford2022whisper} with LoRA \citep{hu2021lora} (rank~16, $\alpha$=32, dropout~0.05).\
+Training uses gradient checkpointing, bf16 when available, and label smoothing.\
+For Track~1 decoding, we force Chinese transcription via the decoder prompt; Track~2 uses language-appropriate decoding without language forcing.\
+Beam search with 5 beams and temperature 0.0 is used unless specified.\\
+Implementation details: we apply LoRA adapters to attention and MLP modules (\texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{out\_proj}, \texttt{fc1}, \texttt{fc2}); enable TF32 for faster, stable training on recent GPUs; and use label smoothing of 0.1.
+
+\section{Experiments}
+We train for 3 epochs with per-device batch size 2 and gradient accumulation 16 on an RTX~4090 (24~GB).\
+Evaluation metrics are CER (Track~1) and SER (Track~2) with sentence-level exact match for reference.
+
+\section{Results}
+On the warm-up set: Track~1 reaches 10.94\% CER with 58.06\% exact match; Track~2 reaches 28.48\% SER with 12.17\% exact match.\
+These numbers are obtained with the shared pipelines and no external data beyond the provided corpora.\
+We observe stable validation under balanced speaker splits and consistent normalization.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\hline
+\textbf{Track} & \textbf{Metric} & \textbf{Score} \\
+\hline
+Track 1 (Hanzi) & CER / EM & 10.94\% / 58.06\% \\
+Track 2 (Pinyin) & SER / EM & 28.48\% / 12.17\% \\
+\hline
+\end{tabular}
+\caption{Warm-up evaluation results. EM: exact match.}
+\label{tab:results}
+\end{table}
+
+\section{Reproducibility}
+Code and scripts are available at \href{https://github.com/Kevindic0214/FSR-Challenge-2025}{github.com/Kevindic0214/FSR-Challenge-2025}.\\
+We provide end-to-end scripts for data preparation, training, inference, and evaluation. Minimal examples:\\
+\textbf{Track 1}:\
+\begin{lstlisting}
+python prepare_hakka_track1.py --root HAT-Vol2 \
+  --drop_mispronounce --relative_audio_path
+python train_whisper_lora_track1.py \
+  --train_jsonl HAT-Vol2/manifests_track1/train.jsonl \
+  --dev_jsonl   HAT-Vol2/manifests_track1/dev.jsonl
+python infer_track1.py --eval_root FSR-2025-Hakka-evaluation \
+  --outfile predictions_track1.csv --model openai/whisper-large-v2 \
+  --lora_dir runs/track1/lora_v2_r16_e3
+python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
+  --hyp predictions_track1.csv
+\end{lstlisting}
+\textbf{Track 2}:\
+\begin{lstlisting}
+python prepare_hakka_track2.py --data_root HAT-Vol2 \
+  --out_dir HAT-Vol2/manifests_track2 --exclude_mispronounced
+python train_whisper_lora_track2.py
+python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
+  --outfile predictions_track2.csv --model openai/whisper-large-v2 \
+  --lora_dir exp_track2_whisper_large_lora
+python eval_track2_ser.py --key_dir FSR-2025-Hakka-evaluation-key \
+  --hyp predictions_track2.csv
+\end{lstlisting}
+
+\section{Error Analysis}
+Common errors include character/phonetic substitutions and occasional short repeats; we monitor n-gram repetition to detect degeneration.\
+Performance degrades mildly for longer utterances; bucketed analysis suggests length-aware decoding or better segmenting could help.
+
+\paragraph{Examples.} Sampled warm-up mismatches:\\
+\emph{(003jh5p8hd.wav)} ref: 大家攏無仰子\textbf{嗬}隨拁你人救出去; hyp: 大家攏無仰子\textbf{項}隨拁你研究出去.\\
+\emph{(03qw9gfad7.wav)} ref: 食\textbf{著}幾隻草蜢\textbf{乜好啊}; hyp: 食\textbf{到佢}隻草蜢\textbf{毋會好啊}.\\
+\emph{(04qied7gz8.wav)} ref: \dots 這兜\textbf{地動無幾著呢}莊頭\dots; hyp: \dots 這兜\textbf{地圖無幾臭呢啊}莊頭\dots
+
+These illustrate homophone/near-neighbor substitutions and local phrase alterations; stronger language modeling or constrained decoding may mitigate such errors.
+
+\section{Conclusion}
+We provide a concise, reproducible baseline for both tracks of FSR-2025 Hakka ASR using Whisper+LoRA.\
+Future work includes dialect-aware adaptation, LM-rescoring for Hanzi, refined Pinyin normalization, and temperature/beam tuning.
+
+\section*{Limitations}
+Our results are based on the provided HAT-Vol2 training data and the official warm-up set. We do not explore external language models or data augmentation; Pinyin normalization choices (e.g., starred syllables) can affect SER.
+
+\section*{Acknowledgments}
+We thank the FSR-2025 organizers and dataset providers.
+
+\bibliographystyle{acl_natbib}
+\bibliography{refs}
+
+\end{document}
