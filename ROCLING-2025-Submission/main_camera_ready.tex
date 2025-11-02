@@ -8,6 +8,24 @@
 \usepackage{latexsym}
 \usepackage{microtype}
 \usepackage{graphicx}
+% Optional vector charts
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{ragged2e}
+% Allow Chinese examples to render when compiled with XeLaTeX
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+  \usepackage{xeCJK}
+  % Prefer TC; fallback to JP.
+  \IfFontExistsTF{Noto Serif CJK TC}{%
+    \setCJKmainfont[BoldFont={Noto Serif CJK TC Bold}]{Noto Serif CJK TC}%
+  }{%
+    \setCJKmainfont[BoldFont={Noto Serif CJK JP Bold}]{Noto Serif CJK JP}%
+  }
+\fi
 \usepackage{listings}
 \lstset{basicstyle=\ttfamily\small,breaklines=true,breakatwhitespace=true,columns=fullflexible}
 \renewcommand{\UrlFont}{\ttfamily\small}
@@ -30,7 +48,7 @@
 
 \begin{abstract}
 We present a compact baseline for the Formosa Speech Recognition (FSR-2025) Taiwanese Hakka ASR challenge.\
-Our system fine-tunes \emph{Whisper-large-v2} \citep{radford2022whisper} with LoRA \citep{hu2021lora}, using consistent text normalization and balanced dev splits.\
+Our system fine-tunes \emph{Whisper-large-v2} (Track~1) and \emph{Whisper-large-v3-turbo} (Track~2) \citep{radford2022whisper} with LoRA \citep{hu2021lora}, using consistent text normalization and balanced dev splits, without external data or language models.\
 On the official warm-up set, we obtain 10.94\% CER for Track~1 (Hanzi) and 28.48\% SER for Track~2 (Pinyin).\
 We provide simple yet reproducible pipelines covering data preparation, training, inference, and evaluation.\
 Code is available at \href{https://github.com/Kevindic0214/FSR-Challenge-2025}{github.com/Kevindic0214/FSR-Challenge-2025}.
@@ -43,7 +61,7 @@ Automatic speech recognition; Hakka; Whisper; LoRA; low-resource; FSR-2025; CER;
 \section{Introduction}
 Taiwanese Hakka is a low-resource language variant of significant cultural value.\
 FSR-2025 defines two tracks: Track~1 evaluates character error rate (CER) on Hanzi, and Track~2 evaluates syllable error rate (SER) on Pinyin.\
-We aim to provide a strong, minimal-requirement baseline using \emph{Whisper-large-v2} fine-tuned with low-rank adaptation (LoRA), emphasizing practical engineering choices and reproducibility over model complexity.\\
+We aim to provide a strong, minimal-requirement baseline using \emph{Whisper-large-v2} (Track~1) and \emph{Whisper-large-v3-turbo} (Track~2) fine-tuned with low-rank adaptation (LoRA), emphasizing practical engineering choices and reproducibility over model complexity.\\
 In this work, we follow the official specification of the FSR-2025 challenge \citep{fsr2025}.
 
 \paragraph{Contributions.} (i) A reproducible baseline for both tracks with unified normalization that matches evaluation; (ii) a simple LoRA recipe runnable on a single 24~GB GPU with balanced speaker-based dev split; (iii) competitive warm-up results with lightweight error and length-bucket analyses.
@@ -56,19 +74,20 @@ We rely on the HAT-Vol2 dataset \citep{hatvol2} and the official warm-up set \ci
 
 \paragraph{Normalization policy.} Track~1 (Hanzi): apply NFKC, remove zero-width characters, map mixed punctuation to Chinese forms, and strip spaces to align with evaluation. Track~2 (Pinyin): apply NFKC, remove zero-width characters, map ü/ǘ/\dots{} and ``u:/U:'' to ``v'', keep only [a--z0--9] and single spaces, and by default drop starred syllables (e.g., ``*ki53'' or ``ki53*''); an optional fix merges split-tone forms (e.g., ``ki 53'' $\rightarrow$ ``ki53'').
 
-\begin{table}[h]
+\begin{table}[t]
 \centering
-\begin{tabular}{lcl}
+\small
+\caption{Dataset overview and evaluation split.}
+\label{tab:data}
+\begin{tabularx}{\linewidth}{@{}>{\RaggedRight\arraybackslash}p{0.30\linewidth} >{\centering\arraybackslash}p{0.18\linewidth} >{\RaggedRight\arraybackslash}X@{}}
 \hline
 \textbf{Split} & \textbf{Size} & \textbf{Notes} \\
 \hline
-HAT-Vol2 (train) & \(\sim\)60 h & Dapu/Zhao'an; 16 kHz mono \\
+HAT-Vol2 (train) & \(\sim\)60 h & Dapu/Zhao'an; 16~kHz mono \\
 Warm-up (eval) & \(\sim\)10 h / 4,299 utt & Official FSR-2025 set \\
 Dev speakers & 12 (balanced) & DF/DM/ZF/ZM allocation \\
 \hline
-\end{tabular}
-\caption{Dataset overview and evaluation split.}
-\label{tab:data}
+\end{tabularx}
 \end{table}
 
 \section{Related Work}
@@ -94,41 +113,135 @@ On the warm-up set: Track~1 reaches 10.94\% CER with 58.06\% exact match; Track~
 These numbers are obtained with the shared pipelines and no external data beyond the provided corpora.\
 We observe stable validation under balanced speaker splits and consistent normalization. Longer utterances show mildly higher error rates (notably in the 12.4--20~s bucket), and we observe small variations across DF/DM/ZF/ZM groups under the balanced-split protocol.
 
-\begin{table}[h]
+% ---- Combined analysis grid (4 panels) ----
+\begin{figure*}[t]
 \centering
-\begin{tabular}{lcc}
+% (a) Track 1: length buckets (CER)
+\begin{minipage}{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=\linewidth,
+    height=3.6cm,
+    ybar,
+    ymin=0,
+    ylabel={CER (\%)},
+    symbolic x coords={0–4.8s,4.8–12.4s,12.4–20s,20–60s,60+s},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=10pt,
+    grid=both,
+    tick label style={/pgf/number format/fixed},
+  ]
+    \addplot table [x=bucket, y expr=\thisrow{cer}*100, col sep=comma] {analysis/track1_buckets_sec.csv};
+  \end{axis}
+\end{tikzpicture}
+\end{minipage}
+\hfill
+% (b) Track 1: group CER
+\begin{minipage}{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=\linewidth,
+    height=3.6cm,
+    ybar,
+    ymin=0,
+    ylabel={CER (\%)},
+    symbolic x coords={DF,DM,ZF,ZM,MED-DP,MED-ZA},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=9pt,
+    grid=both,
+  ]
+    \addplot table [x=group, y expr=\thisrow{cer}*100, col sep=comma] {analysis/track1_groups.csv};
+  \end{axis}
+\end{tikzpicture}
+\end{minipage}
+\\[0.6em]
+% (c) Track 2: length buckets (SER)
+\begin{minipage}{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=\linewidth,
+    height=3.6cm,
+    ybar,
+    ymin=0,
+    ylabel={SER (\%)},
+    symbolic x coords={0–9,10–19,20–39,40–79,80+},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=10pt,
+    grid=both,
+    tick label style={/pgf/number format/fixed},
+  ]
+    \addplot table [x=bucket, y expr=\thisrow{ser}*100, col sep=comma] {analysis/track2_buckets_tok.csv};
+  \end{axis}
+\end{tikzpicture}
+\end{minipage}
+\hfill
+% (d) Track 2: group SER
+\begin{minipage}{0.48\linewidth}
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=\linewidth,
+    height=3.6cm,
+    ybar,
+    ymin=0,
+    ylabel={SER (\%)},
+    symbolic x coords={DF,DM,ZF,ZM,MED-DP,MED-ZA},
+    xtick=data,
+    xticklabel style={rotate=30, anchor=east},
+    bar width=9pt,
+    grid=both,
+  ]
+    \addplot table [x=group, y expr=\thisrow{ser}*100, col sep=comma] {analysis/track2_groups.csv};
+  \end{axis}
+\end{tikzpicture}
+\end{minipage}
+\caption{Warm-up analysis: (a) Track~1 CER by utterance duration; (b) Track~1 CER by group; (c) Track~2 SER by syllable length; (d) Track~2 SER by group.}
+\label{fig:analysis-grid}
+\end{figure*}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l c >{\raggedleft\arraybackslash}X@{}}
 \hline
 \textbf{Track} & \textbf{Metric} & \textbf{Score} \\
 \hline
 Track 1 (Hanzi) & CER / EM & 10.94\% / 58.06\% \\
 Track 2 (Pinyin) & SER / EM & 28.48\% / 12.17\% \\
 \hline
-\end{tabular}
+\end{tabularx}
 \caption{Warm-up evaluation results. EM: exact match.}
 \label{tab:results}
 \end{table}
 
 \paragraph{Final-test results.} On the official final-test, our system achieves 18.78\% CER for Track~1 (ranked 2/3 in our social group) and 33.38\% SER for Track~2. For analysis, we also report a tone-removed Pinyin WER of 21.30\% (ranked 2/2 among teams with available data). Figure~\ref{fig:finaltest} shows the official charts.
 
-\begin{table}[h]
+\begin{table}[t]
 \centering
-\begin{tabular}{lccc}
+\small
+\begin{tabularx}{\linewidth}{@{}l c c >{\raggedleft\arraybackslash}X@{}}
 \hline
-\textbf{Set} & \textbf{Track} & \textbf{Metric} & \textbf{Score (Rank)} \\
+\textbf{Set} & \textbf{Track} & \textbf{Metric} & \textbf{Score (rank)} \\
 \hline
 Final-test & 1 (Hanzi) & CER & 18.78\% (2/3) \\
 Final-test & 2 (Pinyin) & SER & 33.38\% (2/2*) \\
 Final-test & 2 (Pinyin) & WER (tone-removed) & 21.30\% (2/2*) \\
 \hline
-\end{tabular}
+\end{tabularx}
 \caption{Official final-test results. *Among teams with available data in our social group.}
 \label{tab:final}
 \end{table}
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.98\linewidth]{final-test-results/c051e193-1390-464d-b515-e1b62d05aa9f.png}\\[0.3em]
-\includegraphics[width=0.98\linewidth]{final-test-results/dc5b29d9-c132-4733-bab4-7ef8b2af69fd.png}
+\includegraphics[width=0.98\linewidth]{final-test-results/cer-results.png}\\[0.3em]
+\includegraphics[width=0.98\linewidth]{final-test-results/wer-results.png}
 \caption{Challenge 2025 final-test result charts.}
 \label{fig:finaltest}
 \end{figure}
@@ -150,11 +263,19 @@ python infer_track1.py --eval_root FSR-2025-Hakka-evaluation \
 python eval_track1_cer.py --key_dir FSR-2025-Hakka-evaluation-key \
   --hyp predictions_track1.csv
 \end{lstlisting}
+
+\noindent\textit{Alternative (recommended for Track~2 with v3-turbo):}
+\begin{lstlisting}
+python train_whisper_lora_track2.py --base_model openai/whisper-large-v3-turbo --out_dir exp_track2_whisper_large_v3_turbo_lora
+python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
+  --outfile predictions_track2.csv --model openai/whisper-large-v3-turbo \
+  --lora_dir exp_track2_whisper_large_v3_turbo_lora
+\end{lstlisting}
 \textbf{Track 2}:\
 \begin{lstlisting}
 python prepare_hakka_track2.py --data_root HAT-Vol2 \
   --out_dir HAT-Vol2/manifests_track2 --exclude_mispronounced
-python train_whisper_lora_track2.py
+python train_whisper_lora_track2.py --base_model openai/whisper-large-v3-turbo --out_dir exp_track2_whisper_large_v3_turbo_lora
 python infer_track2.py --eval_root FSR-2025-Hakka-evaluation \
   --outfile predictions_track2.csv --model openai/whisper-large-v2 \
   --lora_dir exp_track2_whisper_large_lora
